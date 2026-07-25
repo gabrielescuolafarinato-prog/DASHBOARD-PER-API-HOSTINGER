@@ -68,7 +68,7 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | `DATABASE_URL_UNPOOLED` | Opzionale; fallback migration preferito | Local/integrazione Vercel | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Neon/Vercel |
 | `POSTGRES_URL_NON_POOLING` | Opzionale; secondo fallback migration | Local/integrazione Vercel | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Neon/Vercel |
 | `AUTH_SECRET` | Obbligatoria a runtime; non richiesta dal build | Local, Preview, Production | Segreta | `generated-high-entropy-value-minimum-32-chars` | `openssl rand -base64 48` |
-| `APP_URL` | Locale e dominio canonico; calcolabile su Vercel | Local, Production, dominio custom | Non segreta | `https://dashboard.example.com` | URL dell’app |
+| `APP_URL` | URL canonico completo; calcolabile nelle Preview Vercel | Local, Production, dominio custom | Non segreta | `https://your-project.vercel.app` | URL canonico dell’app |
 | `HOSTINGER_API_TOKEN` | Opzionale, ma in gruppo | Production; normalmente assente in Preview | Segreta | Vuoto nel repository | hPanel Hostinger |
 | `HOSTINGER_ACCOUNT_USERNAME` | Opzionale, ma in gruppo | Production | Sensibile | `u123456789` | Account hosting |
 | `HOSTINGER_SITE_DOMAIN` | Opzionale, ma in gruppo | Production | Non segreta | `example.com` | Sito configurato |
@@ -78,6 +78,7 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | `VERCEL` | Automatica | Vercel | Non segreta | `1` | Vercel System Environment Variables |
 | `VERCEL_ENV` | Automatica | Vercel | Non segreta | `preview` | Vercel |
 | `VERCEL_URL` | Automatica | Vercel | Non segreta | `project-abc.vercel.app` | Vercel |
+| `VERCEL_BRANCH_URL` | Automatica; alias del branch Git | Vercel | Non segreta | `project-git-main-team.vercel.app` | Vercel |
 | `VERCEL_PROJECT_PRODUCTION_URL` | Automatica | Vercel | Non segreta | `project.vercel.app` | Vercel |
 
 Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti. Se il gruppo è assente, la dashboard mostra **Hostinger non configurato** e non effettua chiamate Hostinger.
@@ -101,13 +102,18 @@ Il superamento del build indica soltanto che il pacchetto è distribuibile: l’
 ### Better Auth: Local, Preview e Production
 
 - In sviluppo `http://localhost:3000` viene autorizzato soltanto quando è impostato esplicitamente come `APP_URL`.
+- In Production `APP_URL` deve contenere l’URL canonico completo, con HTTPS.
 - `APP_URL` autorizza un unico origin canonico esatto.
-- Quando `VERCEL=1`, gli host esatti forniti da `VERCEL_URL` e `VERCEL_PROJECT_PRODUCTION_URL` vengono aggiunti all’allowlist.
+- Quando `VERCEL=1`, gli host esatti forniti da `VERCEL_URL` (deployment), `VERCEL_BRANCH_URL` (alias del branch Git) e `VERCEL_PROJECT_PRODUCTION_URL` (dominio Production del progetto) vengono aggiunti all’allowlist.
+- Le tre variabili URL di sistema vengono normalmente fornite da Vercel e non vanno impostate manualmente.
+- I valori Vercel sono accettati solo come hostname sintatticamente validi sotto il confine esatto `.vercel.app`, senza protocollo, porta, credenziali, path, query, fragment, wildcard o spazi.
+- Host e origini vengono normalizzati in lowercase, privati dei punti finali, deduplicati e autorizzati in modo esatto; ogni origin Vercel fidata usa HTTPS.
 - Non viene usata la wildcard `*.vercel.app`.
 - Host e origin sconosciuti vengono rifiutati; non esiste un fallback.
 - Un `APP_URL` di produzione deve usare HTTPS e non può essere localhost.
 - Cookie sicuri sono obbligatori quando `NODE_ENV=production`.
 - `Host` e `X-Forwarded-Host` non vengono accettati liberamente: Better Auth li usa solo dopo il confronto con `allowedHosts`.
+- Dopo ogni modifica alle variabili Vercel è necessario creare un nuovo deployment: i deployment esistenti non vengono aggiornati retroattivamente.
 
 Per le Preview Vercel è consigliato un branch Neon separato e un `AUTH_SECRET` Preview dedicato. Il gruppo Hostinger può e dovrebbe rimanere assente.
 
@@ -260,7 +266,7 @@ Il workflow non imposta variabili applicative o secret. Il build verifica quindi
 2. Collega Neon a Production e agli ambienti Preview desiderati.
 3. Verifica in Vercel che `DATABASE_URL` sia presente negli ambienti corretti.
 4. Genera e configura un `AUTH_SECRET` ad alta entropia.
-5. Configura `APP_URL` Production con l’origin HTTPS canonico. Nelle Preview può essere derivato dall’esatto `VERCEL_URL`.
+5. Configura `APP_URL` Production con l’origin HTTPS canonico completo. Nelle Preview può essere derivato dagli hostname esatti forniti automaticamente da Vercel.
 6. Scarica le variabili per lo sviluppo locale con il flusso Vercel oppure crea localmente `.env.local` senza tracciarlo.
 7. Esegui `npm run db:migrate` contro il database scelto.
 8. Imposta temporaneamente le variabili bootstrap ed esegui `npm run user:bootstrap`.

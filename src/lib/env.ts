@@ -44,6 +44,7 @@ const authInputSchema = z.object({
   VERCEL: z.string().optional(),
   VERCEL_ENV: z.enum(["development", "preview", "production"]).optional(),
   VERCEL_URL: z.string().optional(),
+  VERCEL_BRANCH_URL: z.string().optional(),
   VERCEL_PROJECT_PRODUCTION_URL: z.string().optional(),
 });
 
@@ -72,7 +73,12 @@ function formatError(error: z.ZodError): ServerEnvironmentError {
 }
 
 function normalizeConfiguredOrigin(value: string, production: boolean) {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ServerEnvironmentError("APP_URL must be a complete valid URL.");
+  }
   if (!["http:", "https:"].includes(url.protocol)) {
     throw new ServerEnvironmentError("APP_URL must use HTTP or HTTPS.");
   }
@@ -87,6 +93,7 @@ function normalizeConfiguredOrigin(value: string, production: boolean) {
       "APP_URL must be an origin without credentials, path, query, or hash.",
     );
   }
+  url.hostname = url.hostname.toLowerCase().replace(/\.+$/, "");
   if (production && url.protocol !== "https:") {
     throw new ServerEnvironmentError(
       "APP_URL must use HTTPS outside local development.",
@@ -102,22 +109,44 @@ function normalizeConfiguredOrigin(value: string, production: boolean) {
       "Localhost cannot be an authorized production origin.",
     );
   }
+  if (!production && url.hostname === "localhost" && url.protocol !== "http:") {
+    throw new ServerEnvironmentError(
+      "Localhost must use an explicitly configured HTTP origin.",
+    );
+  }
+  if (!production && url.protocol === "http:" && url.hostname !== "localhost") {
+    throw new ServerEnvironmentError(
+      "HTTP APP_URL is permitted only for explicitly configured localhost development.",
+    );
+  }
   return url.origin;
 }
 
-function vercelOrigin(value: string | undefined) {
+const VERCEL_HOSTNAME_PATTERN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+vercel\.app$/;
+
+type VercelHostnameVariable =
+  | "VERCEL_URL"
+  | "VERCEL_BRANCH_URL"
+  | "VERCEL_PROJECT_PRODUCTION_URL";
+
+function normalizeVercelHostname(
+  name: VercelHostnameVariable,
+  value: string | undefined,
+) {
   if (!value) return undefined;
-  const hostname = value.trim().toLowerCase();
-  if (
-    !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.vercel\.app$/.test(
-      hostname,
-    )
-  ) {
+  if (/\s/.test(value)) {
     throw new ServerEnvironmentError(
-      "Vercel deployment URLs must be exact *.vercel.app hostnames.",
+      `${name} must not contain whitespace.`,
     );
   }
-  return `https://${hostname}`;
+  const hostname = value.toLowerCase().replace(/\.+$/, "");
+  if (!VERCEL_HOSTNAME_PATTERN.test(hostname)) {
+    throw new ServerEnvironmentError(
+      `${name} must be an exact syntactically valid subdomain of vercel.app without a protocol, port, credentials, path, query, fragment, or wildcard.`,
+    );
+  }
+  return hostname;
 }
 
 function authSource(source: EnvironmentSource) {
@@ -128,8 +157,64 @@ function authSource(source: EnvironmentSource) {
     VERCEL: source.VERCEL || undefined,
     VERCEL_ENV: source.VERCEL_ENV || undefined,
     VERCEL_URL: source.VERCEL_URL || undefined,
+    VERCEL_BRANCH_URL: source.VERCEL_BRANCH_URL || undefined,
     VERCEL_PROJECT_PRODUCTION_URL:
       source.VERCEL_PROJECT_PRODUCTION_URL || undefined,
+  };
+}
+
+export type AuthHostConfiguration = {
+  configuredOrigin: string | undefined;
+  allowedHosts: string[];
+  trustedOrigins: string[];
+};
+
+export function getAllowedAuthHosts(
+  source: EnvironmentSource,
+  production = source.NODE_ENV === "production",
+): AuthHostConfiguration {
+  const origins = new Map<string, string>();
+  let configuredOrigin: string | undefined;
+
+  if (source.APP_URL) {
+    configuredOrigin = normalizeConfiguredOrigin(source.APP_URL, production);
+    origins.set(new URL(configuredOrigin).host, configuredOrigin);
+  }
+
+  if (source.VERCEL === "1") {
+    const vercelHosts = [
+      normalizeVercelHostname("VERCEL_URL", source.VERCEL_URL),
+      normalizeVercelHostname("VERCEL_BRANCH_URL", source.VERCEL_BRANCH_URL),
+      normalizeVercelHostname(
+        "VERCEL_PROJECT_PRODUCTION_URL",
+        source.VERCEL_PROJECT_PRODUCTION_URL,
+      ),
+    ];
+
+    for (const hostname of vercelHosts) {
+      if (hostname) origins.set(hostname, `https://${hostname}`);
+    }
+
+    const firstVercelHost = vercelHosts.find(
+      (hostname): hostname is string => Boolean(hostname),
+    );
+    if (
+      firstVercelHost &&
+      configuredOrigin?.startsWith("http://localhost")
+    ) {
+      throw new ServerEnvironmentError(
+        "A local HTTP APP_URL cannot be combined with HTTPS Vercel hosts.",
+      );
+    }
+    configuredOrigin ??= firstVercelHost
+      ? `https://${firstVercelHost}`
+      : undefined;
+  }
+
+  return {
+    configuredOrigin,
+    allowedHosts: [...origins.keys()],
+    trustedOrigins: [...origins.values()],
   };
 }
 
@@ -165,36 +250,27 @@ export function parseAuthEnv(source: EnvironmentSource) {
   if (!result.success) throw formatError(result.error);
 
   const production = result.data.NODE_ENV === "production";
-  const origins = new Set<string>();
-  let configuredOrigin: string | undefined;
+  const hostConfiguration = getAllowedAuthHosts(result.data, production);
 
-  if (result.data.APP_URL) {
-    configuredOrigin = normalizeConfiguredOrigin(result.data.APP_URL, production);
-    origins.add(configuredOrigin);
-  }
-
-  if (result.data.VERCEL === "1") {
-    const deploymentOrigin = vercelOrigin(result.data.VERCEL_URL);
-    const productionOrigin = vercelOrigin(
-      result.data.VERCEL_PROJECT_PRODUCTION_URL,
-    );
-    if (deploymentOrigin) origins.add(deploymentOrigin);
-    if (productionOrigin) origins.add(productionOrigin);
-    configuredOrigin ??= deploymentOrigin ?? productionOrigin;
-  }
-
-  if (!configuredOrigin || origins.size === 0) {
+  if (
+    !hostConfiguration.configuredOrigin ||
+    hostConfiguration.allowedHosts.length === 0
+  ) {
     throw new ServerEnvironmentError(
-      "APP_URL is required unless an exact VERCEL_URL is available.",
+      "APP_URL is required unless an exact Vercel system hostname is available.",
     );
   }
 
-  const allowedOrigins = [...origins];
   return {
     AUTH_SECRET: result.data.AUTH_SECRET,
-    APP_URL: configuredOrigin,
-    AUTH_ALLOWED_ORIGINS: allowedOrigins,
-    AUTH_ALLOWED_HOSTS: allowedOrigins.map((origin) => new URL(origin).host),
+    APP_URL: hostConfiguration.configuredOrigin,
+    AUTH_ALLOWED_ORIGINS: hostConfiguration.trustedOrigins,
+    AUTH_ALLOWED_HOSTS: hostConfiguration.allowedHosts,
+    AUTH_BASE_URL_PROTOCOL: production
+      ? ("https" as const)
+      : hostConfiguration.configuredOrigin.startsWith("http://localhost")
+        ? ("http" as const)
+        : ("https" as const),
     IS_PRODUCTION: production,
   };
 }

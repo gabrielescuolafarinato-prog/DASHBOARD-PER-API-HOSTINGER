@@ -21,7 +21,7 @@ function createAuth() {
     appName: "Hostinger Site Console",
     baseURL: {
       allowedHosts: env.AUTH_ALLOWED_HOSTS,
-      protocol: "auto",
+      protocol: env.AUTH_BASE_URL_PROTOCOL,
     },
     secret: env.AUTH_SECRET,
     trustedOrigins: env.AUTH_ALLOWED_ORIGINS,

@@ -5,6 +5,7 @@ export type AppErrorCode =
   | "VALIDATION_ERROR"
   | "CONFLICT"
   | "HOSTINGER_ERROR"
+  | "HOSTINGER_NOT_NODE"
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";
 

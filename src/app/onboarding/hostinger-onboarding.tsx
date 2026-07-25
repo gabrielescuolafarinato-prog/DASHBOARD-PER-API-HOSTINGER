@@ -1,12 +1,11 @@
 "use client";
 
-import { useActionState } from "react";
-import { useFormStatus } from "react-dom";
+import { useActionState, useEffect, useRef } from "react";
 import { CheckCircle2, LoaderCircle, Search, Server } from "lucide-react";
 import {
   importHostingerSiteAction,
   verifyHostingerSiteAction,
-  type ActionState,
+  type HostingerImportActionState,
   type HostingerVerificationActionState,
 } from "@/app/actions";
 import {
@@ -14,6 +13,10 @@ import {
   inputClass,
   primaryButtonClass,
 } from "@/components/ui";
+import {
+  claimImportSubmission,
+  releaseImportSubmission,
+} from "./import-submission-guard";
 
 type PublicHostingerConfiguration =
   | { status: "unconfigured"; configured: false }
@@ -25,7 +28,10 @@ const initialVerificationState: HostingerVerificationActionState = {
   ok: false,
   status: "idle",
 };
-const initialImportState: ActionState = { ok: false };
+const initialImportState: HostingerImportActionState = {
+  ok: false,
+  status: "idle",
+};
 
 export function HostingerOnboarding({
   configuration,
@@ -36,10 +42,17 @@ export function HostingerOnboarding({
     verifyHostingerSiteAction,
     initialVerificationState,
   );
-  const [importState, importAction] = useActionState(
+  const [importState, importAction, importPending] = useActionState(
     importHostingerSiteAction,
     initialImportState,
   );
+  const importSubmissionLock = useRef(false);
+
+  useEffect(() => {
+    if (!importPending) {
+      releaseImportSubmission(importSubmissionLock);
+    }
+  }, [importPending, importState]);
 
   const state = verificationPending
     ? "verifying"
@@ -97,7 +110,7 @@ export function HostingerOnboarding({
             <button
               type="submit"
               className={primaryButtonClass}
-              disabled={verificationPending}
+              disabled={verificationPending || importPending}
             >
               {verificationPending ? (
                 <LoaderCircle
@@ -157,7 +170,15 @@ export function HostingerOnboarding({
             ) : null}
           </dl>
 
-          <form action={importAction} className="mt-5">
+          <form
+            action={importAction}
+            className="mt-5"
+            onSubmit={(event) => {
+              if (!claimImportSubmission(importSubmissionLock)) {
+                event.preventDefault();
+              }
+            }}
+          >
             <label
               htmlFor="confirmationDomain"
               className="text-sm font-semibold text-slate-800"
@@ -174,15 +195,16 @@ export function HostingerOnboarding({
               autoComplete="off"
               spellCheck={false}
               required
+              disabled={importPending}
               className={inputClass}
             />
             <p className="mt-2 text-xs leading-5 text-slate-500">
               Prima del salvataggio il server ripeterà discovery e verifica
               Node.js usando soltanto dominio e username server-side.
             </p>
-            <ImportButton />
+            <ImportButton pending={importPending} />
           </form>
-          {!importState.ok && importState.message ? (
+          {importState.status === "error" ? (
             <ControlledError>{importState.message}</ControlledError>
           ) : null}
         </div>
@@ -233,8 +255,7 @@ function ControlledError({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ImportButton() {
-  const { pending } = useFormStatus();
+function ImportButton({ pending }: { pending: boolean }) {
   return (
     <button
       type="submit"

@@ -1,5 +1,7 @@
 import "server-only";
+import { randomBytes } from "node:crypto";
 import { sql, type SQL } from "drizzle-orm";
+import { z } from "zod";
 import { getDb } from "@/db";
 import { writeAuditEvent, hashAuditIdentifier } from "@/lib/audit";
 import {
@@ -23,18 +25,113 @@ export type VerifiedConfiguredSite = {
   correlationId?: string;
 };
 
-export type SiteImportResult = {
-  outcome: "imported" | "already_completed";
-  siteId: string;
-};
+export type SiteImportConflictReason =
+  | "different_site"
+  | "membership_conflict"
+  | "username_conflict"
+  | "ambiguous_state"
+  | "unique_violation";
+
+export type ImportFailurePhase =
+  | "precheck"
+  | "hostinger_reverification"
+  | "database_import"
+  | "result_decode"
+  | "postcondition"
+  | "redirect";
+
+export type HostingerVerificationFailureCode =
+  | "SITE_NOT_FOUND"
+  | "NOT_NODE_JS"
+  | "RATE_LIMITED"
+  | "HOSTINGER_ERROR";
+
+export type HostingerSiteImportOutcome =
+  | { type: "imported"; siteId: string }
+  | { type: "already_imported"; siteId: string }
+  | {
+      type: "single_site_conflict";
+      reason: SiteImportConflictReason;
+    }
+  | {
+      type: "verification_failed";
+      code: HostingerVerificationFailureCode;
+    }
+  | {
+      type: "persistence_failed";
+      referenceId: string;
+      phase: Exclude<ImportFailurePhase, "redirect">;
+    };
+
+export type SiteImportPrecheckOutcome =
+  | { type: "ready" }
+  | Extract<
+      HostingerSiteImportOutcome,
+      {
+        type:
+          | "already_imported"
+          | "single_site_conflict"
+          | "persistence_failed";
+      }
+    >;
 
 type ImportQueryRow = {
   outcome: "imported" | "already_completed" | "conflict";
   site_id: string | null;
-  conflict_reason: string | null;
+  conflict_reason: SiteImportConflictReason | null;
 };
 
 export type ImportQueryExecutor = (query: SQL) => Promise<unknown>;
+export type ImportStateQueryExecutor = (query: SQL) => Promise<unknown>;
+
+export type ImportDependencies = {
+  executeImport?: ImportQueryExecutor;
+  queryState?: ImportStateQueryExecutor;
+};
+
+type ImportStateRow = {
+  site_id: string | null;
+  target_site_count: number;
+  other_site_count: number;
+  username_match_count: number;
+  verified_node_match_count: number;
+  order_match_count: number;
+  owner_admin_membership_count: number;
+  owner_membership_count: number;
+  primary_binding_match_count: number;
+  primary_binding_count: number;
+};
+
+const importQueryRowSchema = z
+  .object({
+    outcome: z.enum(["imported", "already_completed", "conflict"]),
+    site_id: z.string().uuid().nullable(),
+    conflict_reason: z
+      .enum([
+        "different_site",
+        "membership_conflict",
+        "username_conflict",
+        "ambiguous_state",
+        "unique_violation",
+      ])
+      .nullable(),
+  })
+  .strict();
+
+const importStateRowSchema = z
+  .object({
+    site_id: z.string().uuid().nullable(),
+    target_site_count: z.number().int().nonnegative(),
+    other_site_count: z.number().int().nonnegative(),
+    username_match_count: z.number().int().nonnegative(),
+    verified_node_match_count: z.number().int().nonnegative(),
+    order_match_count: z.number().int().nonnegative(),
+    owner_admin_membership_count: z.number().int().nonnegative(),
+    owner_membership_count: z.number().int().nonnegative(),
+    primary_binding_match_count: z.number().int().nonnegative(),
+    primary_binding_count: z.number().int().nonnegative(),
+  })
+  .strict();
 
 export function selectExactWebsite(
   configuredDomain: string,
@@ -118,7 +215,7 @@ export async function verifyConfiguredHostingerSite(
     } catch (error) {
       if (error instanceof AppError && error.status === 404) {
         throw new AppError(
-          "HOSTINGER_ERROR",
+          "HOSTINGER_NOT_NODE",
           "The configured site could not be confirmed as a Node.js site.",
           422,
           error.correlationId,
@@ -178,15 +275,11 @@ export async function verifyConfiguredHostingerSite(
 export async function importVerifiedConfiguredSite(
   actorUserId: string,
   verified: VerifiedConfiguredSite,
-  execute: ImportQueryExecutor = executeImportQuery,
-): Promise<SiteImportResult> {
+  dependencies: ImportDependencies = {},
+): Promise<HostingerSiteImportOutcome> {
   const domain = normalizeDomain(verified.domain);
   if (!verified.nodeEnabled || verified.siteStatus !== "VERIFIED") {
-    throw new AppError(
-      "VALIDATION_ERROR",
-      "Only a verified Node.js site can be imported.",
-      400,
-    );
+    return { type: "verification_failed", code: "NOT_NODE_JS" };
   }
 
   const query = buildAtomicImportQuery({
@@ -197,44 +290,294 @@ export async function importVerifiedConfiguredSite(
     correlationId: verified.correlationId,
   });
 
-  let rawResult: unknown;
+  const execute = dependencies.executeImport ?? executeImportQuery;
+  const queryState = dependencies.queryState ?? executeImportStateQuery;
+  let rawResult: unknown = undefined;
+  let executionError: unknown = undefined;
   try {
     rawResult = await execute(query);
   } catch (error) {
-    if (isUniqueViolation(error)) {
-      await writeAuditEvent({
+    executionError = error;
+  }
+
+  const decoded =
+    executionError === undefined
+      ? decodeImportQueryResult(rawResult)
+      : { type: "not_available" as const };
+
+  let finalState: ImportStateRow | undefined;
+  let postconditionError: unknown;
+  try {
+    const stateResult = await queryState(
+      buildImportStateQuery({
         actorUserId,
+        domain,
+        username: verified.username,
+        orderId: verified.orderId,
+      }),
+    );
+    const stateDecoded = decodeImportStateResult(stateResult);
+    if (stateDecoded.type === "decoded") {
+      finalState = stateDecoded.row;
+    } else {
+      postconditionError = new Error(
+        `Import state result was ${stateDecoded.type}.`,
+      );
+    }
+  } catch (error) {
+    postconditionError = error;
+  }
+
+  if (
+    finalState &&
+    importPostconditionSatisfied(finalState) &&
+    finalState.site_id
+  ) {
+    if (decoded.type !== "decoded" || executionError !== undefined) {
+      logImportDiagnostic({
+        referenceId: createImportReferenceId(),
+        phase:
+          executionError === undefined ? "result_decode" : "database_import",
+        error: executionError,
+        correlationId: verified.correlationId,
+        result: "postcondition_recovered",
+      });
+    }
+    return {
+      type:
+        decoded.type === "decoded" &&
+        decoded.row.outcome === "already_completed"
+          ? "already_imported"
+          : executionError !== undefined
+            ? "already_imported"
+            : "imported",
+      siteId: finalState.site_id,
+    };
+  }
+
+  if (executionError !== undefined) {
+    if (isUniqueViolation(executionError)) {
+      await writeImportAuditSafely({
+        actorUserId,
+        domain,
         operation: "hostinger_site_import_conflict",
-        targetType: "site",
-        targetIdentifier: domain,
         result: "FAILURE",
         metadata: { reason: "unique_violation" },
       });
-      throw new AppError(
-        "CONFLICT",
-        "The site import conflicts with an existing single-site record.",
-        409,
-      );
+      return {
+        type: "single_site_conflict",
+        reason: "unique_violation",
+      };
     }
-    throw error;
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain,
+      phase: "database_import",
+      error: executionError,
+      correlationId: verified.correlationId,
+    });
   }
 
-  const [row] = resultRows(rawResult);
-  if (!row || !isImportQueryRow(row)) {
-    throw new AppError(
-      "INTERNAL_ERROR",
-      "The atomic site import did not return a valid result.",
-      500,
-    );
+  if (postconditionError !== undefined) {
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain,
+      phase: "postcondition",
+      error: postconditionError,
+      correlationId: verified.correlationId,
+    });
   }
-  if (row.outcome === "conflict" || !row.site_id) {
-    throw new AppError(
-      "CONFLICT",
-      conflictMessage(row.conflict_reason),
-      409,
-    );
+
+  if (decoded.type !== "decoded") {
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain,
+      phase: "result_decode",
+      error: new Error(`Import result was ${decoded.type}.`),
+      correlationId: verified.correlationId,
+    });
   }
-  return { outcome: row.outcome, siteId: row.site_id };
+
+  if (
+    decoded.row.outcome === "conflict" ||
+    decoded.row.site_id === null
+  ) {
+    return {
+      type: "single_site_conflict",
+      reason: decoded.row.conflict_reason ?? "ambiguous_state",
+    };
+  }
+
+  return reportUnexpectedImportFailure({
+    actorUserId,
+    domain,
+    phase: "postcondition",
+    error: new Error("Import result and final state were inconsistent."),
+    correlationId: verified.correlationId,
+  });
+}
+
+/**
+ * Checks the authoritative database state before any new Hostinger request.
+ * Partial state that the atomic statement can safely complete remains ready;
+ * ambiguous or incompatible single-site state fails closed.
+ */
+export async function precheckConfiguredHostingerSite(
+  actorUserId: string,
+  dependencies: {
+    queryState?: ImportStateQueryExecutor;
+    configuredSite?: { domain: string; username: string };
+  } = {},
+): Promise<SiteImportPrecheckOutcome> {
+  let configuredSite: { domain: string; username: string };
+  try {
+    configuredSite =
+      dependencies.configuredSite ?? configuredSiteIdentity();
+  } catch (error) {
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain: "configured-site",
+      phase: "precheck",
+      error,
+    });
+  }
+  const domain = normalizeDomain(configuredSite.domain);
+  const queryState = dependencies.queryState ?? executeImportStateQuery;
+
+  let decoded: ReturnType<typeof decodeImportStateResult>;
+  try {
+    decoded = decodeImportStateResult(
+      await queryState(
+        buildImportStateQuery({
+          actorUserId,
+          domain,
+          username: configuredSite.username,
+        }),
+      ),
+    );
+  } catch (error) {
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain,
+      phase: "precheck",
+      error,
+    });
+  }
+
+  if (decoded.type !== "decoded") {
+    return reportUnexpectedImportFailure({
+      actorUserId,
+      domain,
+      phase: "precheck",
+      error: new Error(`Precheck result was ${decoded.type}.`),
+    });
+  }
+
+  const state = decoded.row;
+  if (importPostconditionSatisfied(state) && state.site_id) {
+    await writeImportAuditSafely({
+      actorUserId,
+      domain,
+      siteId: state.site_id,
+      operation: "hostinger_site_import_already_completed",
+      result: "SUCCESS",
+      metadata: { outcome: "already_imported", phase: "precheck" },
+    });
+    return { type: "already_imported", siteId: state.site_id };
+  }
+
+  const conflict = precheckConflictReason(state);
+  if (conflict) {
+    await writeImportAuditSafely({
+      actorUserId,
+      domain,
+      siteId: state.site_id,
+      operation: "hostinger_site_import_conflict",
+      result: "FAILURE",
+      metadata: { reason: conflict, phase: "precheck" },
+    });
+    return { type: "single_site_conflict", reason: conflict };
+  }
+
+  return { type: "ready" };
+}
+
+export function buildImportStateQuery(input: {
+  actorUserId: string;
+  domain: string;
+  username: string;
+  orderId?: string;
+}) {
+  const expectedOrderId = input.orderId ?? null;
+  return sql`
+    WITH target_sites AS MATERIALIZED (
+      SELECT
+        id,
+        hostinger_username,
+        hostinger_order_id,
+        node_enabled,
+        status
+      FROM sites
+      WHERE lower(primary_domain) = lower(${input.domain})
+    )
+    SELECT
+      (SELECT min(id::text) FROM target_sites) AS site_id,
+      (
+        SELECT count(*)::int
+        FROM target_sites
+      ) AS target_site_count,
+      (
+        SELECT count(*)::int
+        FROM sites
+        WHERE lower(primary_domain) <> lower(${input.domain})
+      ) AS other_site_count,
+      (
+        SELECT count(*)::int
+        FROM target_sites
+        WHERE hostinger_username = ${input.username}
+      ) AS username_match_count,
+      (
+        SELECT count(*)::int
+        FROM target_sites
+        WHERE hostinger_username = ${input.username}
+          AND status = 'VERIFIED'
+          AND node_enabled = true
+      ) AS verified_node_match_count,
+      (
+        SELECT count(*)::int
+        FROM target_sites
+        WHERE ${expectedOrderId}::text IS NULL
+          OR hostinger_order_id = ${expectedOrderId}::text
+      ) AS order_match_count,
+      (
+        SELECT count(*)::int
+        FROM site_memberships membership
+        INNER JOIN target_sites target
+          ON target.id = membership.site_id
+        WHERE membership.user_id = ${input.actorUserId}::uuid
+          AND membership.role = 'ADMIN'
+      ) AS owner_admin_membership_count,
+      (
+        SELECT count(*)::int
+        FROM site_memberships membership
+        WHERE membership.user_id = ${input.actorUserId}::uuid
+      ) AS owner_membership_count,
+      (
+        SELECT count(*)::int
+        FROM hostinger_resource_bindings binding
+        INNER JOIN target_sites target
+          ON target.id = binding.site_id
+        WHERE binding.resource_type = 'PRIMARY_DOMAIN'
+          AND lower(binding.external_id) = lower(${input.domain})
+      ) AS primary_binding_match_count,
+      (
+        SELECT count(*)::int
+        FROM hostinger_resource_bindings binding
+        INNER JOIN target_sites target
+          ON target.id = binding.site_id
+        WHERE binding.resource_type = 'PRIMARY_DOMAIN'
+      ) AS primary_binding_count
+  `;
 }
 
 export function buildAtomicImportQuery(input: {
@@ -453,30 +796,267 @@ async function executeImportQuery(query: SQL) {
   return await getDb().execute(query);
 }
 
-function resultRows(result: unknown): unknown[] {
-  if (Array.isArray(result)) return result;
-  if (
-    result &&
-    typeof result === "object" &&
-    "rows" in result &&
-    Array.isArray((result as { rows: unknown }).rows)
-  ) {
-    return (result as { rows: unknown[] }).rows;
-  }
-  return [];
+async function executeImportStateQuery(query: SQL) {
+  return await getDb().execute(query);
 }
 
-function isImportQueryRow(value: unknown): value is ImportQueryRow {
-  if (!value || typeof value !== "object") return false;
-  const row = value as Record<string, unknown>;
+export type ImportResultDecode =
+  | { type: "decoded"; row: ImportQueryRow }
+  | { type: "zero_rows" }
+  | { type: "malformed" };
+
+export function decodeImportQueryResult(
+  result: unknown,
+): ImportResultDecode {
+  const rows = documentedResultRows(result);
+  if (!rows) return { type: "malformed" };
+  if (rows.length === 0) return { type: "zero_rows" };
+  if (rows.length !== 1) return { type: "malformed" };
+  const parsed = importQueryRowSchema.safeParse(rows[0]);
+  return parsed.success
+    ? { type: "decoded", row: parsed.data }
+    : { type: "malformed" };
+}
+
+function decodeImportStateResult(
+  result: unknown,
+):
+  | { type: "decoded"; row: ImportStateRow }
+  | { type: "zero_rows" }
+  | { type: "malformed" } {
+  const rows = documentedResultRows(result);
+  if (!rows) return { type: "malformed" };
+  if (rows.length === 0) return { type: "zero_rows" };
+  if (rows.length !== 1) return { type: "malformed" };
+  const parsed = importStateRowSchema.safeParse(rows[0]);
+  return parsed.success
+    ? { type: "decoded", row: parsed.data }
+    : { type: "malformed" };
+}
+
+/**
+ * drizzle-orm/neon-http 0.45 executes raw SQL with `fullResults: true`, so the
+ * production shape is `{ rows, fields, command, rowCount, rowAsArray }`.
+ * Direct row arrays are also accepted for the documented Neon non-full-result
+ * form and for isolated executors used by tests.
+ */
+function documentedResultRows(result: unknown): unknown[] | null {
+  if (Array.isArray(result)) return result;
+  const parsed = z
+    .object({
+      rows: z.array(z.unknown()),
+      fields: z.array(z.unknown()),
+      command: z.literal("SELECT"),
+      rowCount: z.number().int().nonnegative(),
+      rowAsArray: z.literal(false),
+    })
+    .passthrough()
+    .safeParse(result);
+  return parsed.success &&
+    parsed.data.rowCount === parsed.data.rows.length
+    ? parsed.data.rows
+    : null;
+}
+
+function importPostconditionSatisfied(state: ImportStateRow) {
   return (
-    (row.outcome === "imported" ||
-      row.outcome === "already_completed" ||
-      row.outcome === "conflict") &&
-    (typeof row.site_id === "string" || row.site_id === null) &&
-    (typeof row.conflict_reason === "string" ||
-      row.conflict_reason === null)
+    state.target_site_count === 1 &&
+    state.other_site_count === 0 &&
+    state.username_match_count === 1 &&
+    state.verified_node_match_count === 1 &&
+    state.order_match_count === 1 &&
+    state.owner_admin_membership_count === 1 &&
+    state.owner_membership_count === 1 &&
+    state.primary_binding_match_count === 1 &&
+    state.primary_binding_count === 1
   );
+}
+
+function precheckConflictReason(
+  state: ImportStateRow,
+): SiteImportConflictReason | null {
+  if (state.other_site_count > 0) return "different_site";
+  if (state.target_site_count > 1 || state.owner_membership_count > 1) {
+    return "ambiguous_state";
+  }
+  if (
+    state.target_site_count === 1 &&
+    state.username_match_count !== 1
+  ) {
+    return "username_conflict";
+  }
+  if (
+    state.primary_binding_count > 1 ||
+    (state.primary_binding_count === 1 &&
+      state.primary_binding_match_count !== 1)
+  ) {
+    return "ambiguous_state";
+  }
+  if (state.target_site_count === 0 && state.owner_membership_count > 0) {
+    return "membership_conflict";
+  }
+  return null;
+}
+
+function configuredSiteIdentity() {
+  const configuration = getHostingerConfigurationState();
+  const env = getHostingerEnv();
+  if (!configuration.configured || !env.HOSTINGER_ACCOUNT_USERNAME) {
+    throw new AppError(
+      "HOSTINGER_ERROR",
+      "Hostinger is not configured correctly.",
+      503,
+    );
+  }
+  return {
+    domain: configuration.domain,
+    username: env.HOSTINGER_ACCOUNT_USERNAME,
+  };
+}
+
+function createImportReferenceId() {
+  return randomBytes(6).toString("hex").toUpperCase();
+}
+
+export async function reportUnexpectedImportFailure(input: {
+  actorUserId: string;
+  domain: string;
+  phase: Exclude<ImportFailurePhase, "redirect">;
+  error: unknown;
+  correlationId?: string;
+}): Promise<
+  Extract<HostingerSiteImportOutcome, { type: "persistence_failed" }>
+> {
+  const referenceId = createImportReferenceId();
+  const diagnostic = logImportDiagnostic({
+    referenceId,
+    phase: input.phase,
+    error: input.error,
+    correlationId: input.correlationId,
+    result: "failure",
+  });
+  await writeImportAuditSafely({
+    actorUserId: input.actorUserId,
+    domain: input.domain,
+    operation: "hostinger_site_import_failed",
+    result: "FAILURE",
+    metadata: diagnostic,
+  });
+  return {
+    type: "persistence_failed",
+    referenceId,
+    phase: input.phase,
+  };
+}
+
+export function logRecoveredImportIssue(input: {
+  phase: ImportFailurePhase;
+  error: unknown;
+  correlationId?: string;
+}) {
+  logImportDiagnostic({
+    referenceId: createImportReferenceId(),
+    phase: input.phase,
+    error: input.error,
+    correlationId: input.correlationId,
+    result: "recovered",
+  });
+}
+
+function logImportDiagnostic(input: {
+  referenceId: string;
+  phase: ImportFailurePhase;
+  error?: unknown;
+  correlationId?: string;
+  result: "failure" | "recovered" | "postcondition_recovered";
+}) {
+  const database = databaseErrorMetadata(input.error);
+  const diagnostic = {
+    referenceId: input.referenceId,
+    phase: input.phase,
+    postgresCode: database.postgresCode,
+    constraint: database.constraint,
+    errorType: database.errorType,
+    correlationId: sanitizeCorrelationId(input.correlationId),
+    result: input.result,
+  };
+  console.error("hostinger_site_import_diagnostic", diagnostic);
+  return diagnostic;
+}
+
+function databaseErrorMetadata(error: unknown) {
+  const record =
+    error && typeof error === "object"
+      ? (error as Record<string, unknown>)
+      : undefined;
+  const postgresCode =
+    typeof record?.code === "string" &&
+    /^[A-Z0-9]{5}$/.test(record.code)
+      ? record.code
+      : undefined;
+  const constraint =
+    typeof record?.constraint === "string" &&
+    SAFE_DATABASE_CONSTRAINTS.has(record.constraint)
+      ? record.constraint
+      : undefined;
+  const candidateType = error instanceof Error ? error.name : typeof error;
+  const errorType = SAFE_ERROR_TYPES.has(candidateType)
+    ? candidateType
+    : error instanceof Error
+      ? "Error"
+      : "UnknownError";
+  return { postgresCode, constraint, errorType };
+}
+
+const SAFE_DATABASE_CONSTRAINTS = new Set([
+  "sites_primary_domain_unique",
+  "site_memberships_site_user_unique",
+  "resource_bindings_site_type_external_unique",
+  "site_memberships_site_id_sites_id_fk",
+  "site_memberships_user_id_users_id_fk",
+  "hostinger_resource_bindings_site_id_sites_id_fk",
+  "audit_events_actor_user_id_users_id_fk",
+  "audit_events_site_id_sites_id_fk",
+]);
+
+const SAFE_ERROR_TYPES = new Set([
+  "Error",
+  "AppError",
+  "TypeError",
+  "RangeError",
+  "AbortError",
+  "PostgresError",
+]);
+
+function sanitizeCorrelationId(value: unknown) {
+  return typeof value === "string" &&
+    /^[A-Za-z0-9._:/-]{1,200}$/.test(value)
+    ? value
+    : undefined;
+}
+
+async function writeImportAuditSafely(input: {
+  actorUserId: string;
+  domain: string;
+  siteId?: string | null;
+  operation: string;
+  result: "SUCCESS" | "FAILURE";
+  metadata?: Record<string, unknown>;
+}) {
+  try {
+    await writeAuditEvent({
+      actorUserId: input.actorUserId,
+      siteId: input.siteId,
+      operation: input.operation,
+      targetType: "site",
+      targetIdentifier: input.domain,
+      result: input.result,
+      metadata: input.metadata,
+    });
+  } catch {
+    // The primary operation outcome must not be replaced by a secondary audit
+    // write failure. The main diagnostic already carries the reference ID.
+  }
 }
 
 function isUniqueViolation(error: unknown) {
@@ -486,17 +1066,4 @@ function isUniqueViolation(error: unknown) {
       "code" in error &&
       (error as { code?: unknown }).code === "23505",
   );
-}
-
-function conflictMessage(reason: string | null) {
-  if (reason === "different_site") {
-    return "Another site record already occupies the single-site workspace.";
-  }
-  if (reason === "membership_conflict") {
-    return "The OWNER already has an incompatible site membership.";
-  }
-  if (reason === "username_conflict") {
-    return "The existing site belongs to a different hosting username.";
-  }
-  return "The site import conflicts with the existing workspace state.";
 }

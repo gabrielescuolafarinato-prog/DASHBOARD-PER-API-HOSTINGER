@@ -3,7 +3,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   requireOwnerOnboarding: vi.fn(),
-  hostingerConfigured: false,
+  hostinger: {
+    status: "unconfigured" as
+      | "unconfigured"
+      | "incomplete"
+      | "invalid"
+      | "ready",
+    configured: false,
+    domain: undefined as string | undefined,
+  },
 }));
 
 vi.mock("@/lib/auth/session", () => ({
@@ -11,18 +19,32 @@ vi.mock("@/lib/auth/session", () => ({
 }));
 vi.mock("@/lib/env", () => ({
   getApplicationSetupStatus: () => ({
-    hostingerConfigured: mocks.hostingerConfigured,
+    hostingerConfigured: mocks.hostinger.configured,
+    hostinger: mocks.hostinger.configured
+      ? {
+          status: "ready",
+          configured: true,
+          domain: mocks.hostinger.domain,
+        }
+      : {
+          status: mocks.hostinger.status,
+          configured: false,
+        },
   }),
 }));
 vi.mock("@/app/actions", () => ({
   logoutAction: vi.fn(),
+  verifyHostingerSiteAction: vi.fn(),
+  importHostingerSiteAction: vi.fn(),
 }));
 
 import OnboardingPage from "./page";
 
 describe("owner onboarding page", () => {
   beforeEach(() => {
-    mocks.hostingerConfigured = false;
+    mocks.hostinger.status = "unconfigured";
+    mocks.hostinger.configured = false;
+    mocks.hostinger.domain = undefined;
     mocks.requireOwnerOnboarding.mockReset();
     mocks.requireOwnerOnboarding.mockResolvedValue({
       user: {
@@ -40,19 +62,37 @@ describe("owner onboarding page", () => {
     expect(markup).toContain("Configurazione iniziale richiesta");
     expect(markup).toContain("Account OWNER attivo");
     expect(markup).toContain("non è ancora");
-    expect(markup).toContain("Non configurata");
+    expect(markup).toContain("Hostinger non configurato");
+    expect(markup).toContain("HOSTINGER_API_TOKEN");
+    expect(markup).toContain("HOSTINGER_ACCOUNT_USERNAME");
+    expect(markup).toContain("HOSTINGER_SITE_DOMAIN");
+    expect(markup).toContain("disabled");
     expect(markup).toContain("Logout");
   });
 
-  it("shows only the generic configured status", async () => {
-    mocks.hostingerConfigured = true;
+  it("shows only the safe configured domain and ready status", async () => {
+    mocks.hostinger.status = "ready";
+    mocks.hostinger.configured = true;
+    mocks.hostinger.domain = "example.com";
     const markup = renderToStaticMarkup(await OnboardingPage());
 
-    expect(markup).toContain("Configurata");
+    expect(markup).toContain("Pronto per la verifica");
+    expect(markup).toContain("example.com");
+    expect(markup).toContain("Verifica sito Hostinger");
     expect(markup).not.toContain("HOSTINGER_API_TOKEN");
     expect(markup).not.toContain("HOSTINGER_ACCOUNT_USERNAME");
     expect(markup).not.toContain("DATABASE_URL");
     expect(markup).not.toContain("AUTH_SECRET");
+  });
+
+  it.each([
+    ["incomplete", "Configurazione incompleta"],
+    ["invalid", "Errore controllato"],
+  ])("renders the controlled %s state", async (status, label) => {
+    mocks.hostinger.status = status as "incomplete" | "invalid";
+    const markup = renderToStaticMarkup(await OnboardingPage());
+    expect(markup).toContain(label);
+    expect(markup).not.toContain("server-secret-value");
   });
 
   it.each([

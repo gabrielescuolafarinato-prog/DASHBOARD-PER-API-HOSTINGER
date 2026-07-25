@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeDomain } from "@/lib/hostinger/domain";
 
 export type EnvironmentSource = Record<string, string | undefined>;
 
@@ -50,9 +51,38 @@ const authInputSchema = z.object({
 
 const hostingerSchema = z
   .object({
-    HOSTINGER_API_TOKEN: z.string().min(1).optional(),
-    HOSTINGER_ACCOUNT_USERNAME: z.string().min(1).optional(),
-    HOSTINGER_SITE_DOMAIN: z.string().min(1).optional(),
+    HOSTINGER_API_TOKEN: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => !/[\u0000-\u001f\u007f]/.test(value),
+        "must not contain control characters",
+      )
+      .optional(),
+    HOSTINGER_ACCOUNT_USERNAME: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(
+        /^[A-Za-z0-9._-]+$/,
+        "must be a plain hosting username",
+      )
+      .optional(),
+    HOSTINGER_SITE_DOMAIN: z
+      .string()
+      .transform((value, context) => {
+        try {
+          return normalizeDomain(value);
+        } catch {
+          context.addIssue({
+            code: "custom",
+            message: "must be a valid hostname",
+          });
+          return z.NEVER;
+        }
+      })
+      .optional(),
   })
   .superRefine((value, context) => {
     const count = Object.values(value).filter(Boolean).length;
@@ -297,6 +327,42 @@ export function parseHostingerEnv(source: EnvironmentSource) {
   return result.data;
 }
 
+export type HostingerConfigurationState =
+  | { status: "unconfigured"; configured: false }
+  | { status: "incomplete"; configured: false }
+  | { status: "invalid"; configured: false }
+  | { status: "ready"; configured: true; domain: string };
+
+export function getHostingerConfigurationState(
+  source: EnvironmentSource = process.env,
+): HostingerConfigurationState {
+  const values = [
+    source.HOSTINGER_API_TOKEN,
+    source.HOSTINGER_ACCOUNT_USERNAME,
+    source.HOSTINGER_SITE_DOMAIN,
+  ];
+  const present = values.filter(
+    (value) => typeof value === "string" && value.length > 0,
+  ).length;
+
+  if (present === 0) return { status: "unconfigured", configured: false };
+  if (present !== 3) return { status: "incomplete", configured: false };
+
+  try {
+    const parsed = parseHostingerEnv(source);
+    if (!parsed.HOSTINGER_SITE_DOMAIN) {
+      return { status: "invalid", configured: false };
+    }
+    return {
+      status: "ready",
+      configured: true,
+      domain: parsed.HOSTINGER_SITE_DOMAIN,
+    };
+  } catch {
+    return { status: "invalid", configured: false };
+  }
+}
+
 export function getApplicationSetupStatus(
   source: EnvironmentSource = process.env,
 ) {
@@ -312,29 +378,15 @@ export function getApplicationSetupStatus(
     authenticationConfigured = false;
   }
 
-  const hostinger = parseHostingerEnvSafely(source);
-  const hostingerConfigured =
-    hostinger.valid &&
-    Boolean(
-      hostinger.value?.HOSTINGER_API_TOKEN &&
-        hostinger.value.HOSTINGER_ACCOUNT_USERNAME &&
-        hostinger.value.HOSTINGER_SITE_DOMAIN,
-    );
+  const hostinger = getHostingerConfigurationState(source);
 
   return {
     applicationConfigured: databaseConfigured && authenticationConfigured,
     databaseConfigured,
     authenticationConfigured,
-    hostingerConfigured,
+    hostingerConfigured: hostinger.configured,
+    hostinger,
   } as const;
-}
-
-function parseHostingerEnvSafely(source: EnvironmentSource) {
-  try {
-    return { valid: true as const, value: parseHostingerEnv(source) };
-  } catch {
-    return { valid: false as const, value: undefined };
-  }
 }
 
 export function isAllowedAuthOrigin(

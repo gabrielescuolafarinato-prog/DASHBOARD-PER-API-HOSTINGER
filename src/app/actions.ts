@@ -6,20 +6,41 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { eq } from "drizzle-orm";
 import { getAuth } from "@/lib/auth";
-import { requireOwner, requireSession } from "@/lib/auth/session";
+import {
+  requireOwner,
+  requireOwnerOnboarding,
+  requireSession,
+} from "@/lib/auth/session";
 import { createCollaborator, setUserActive } from "@/lib/team/service";
-import { normalizeError } from "@/lib/errors";
+import { AppError, normalizeError } from "@/lib/errors";
 import { passwordSchema } from "@/lib/auth/password-policy";
 import { getDb } from "@/db";
 import { user } from "@/db/schema";
 import { writeAuditEvent } from "@/lib/audit";
-import { synchronizeConfiguredSite } from "@/lib/hostinger/site-sync";
+import {
+  importVerifiedConfiguredSite,
+  verifyConfiguredHostingerSite,
+} from "@/lib/hostinger/site-sync";
+import {
+  getHostingerConfigurationState,
+} from "@/lib/env";
+import { normalizeDomain } from "@/lib/hostinger/domain";
 
 export type ActionState = {
   ok: boolean;
   message?: string;
   code?: string;
   temporaryPassword?: string;
+};
+
+export type HostingerVerificationActionState = ActionState & {
+  status: "idle" | "verified" | "error";
+  site?: {
+    domain: string;
+    siteStatus: "VERIFIED";
+    nodeEnabled: true;
+    orderId?: string;
+  };
 };
 
 const collaboratorSchema = z.object({
@@ -142,18 +163,111 @@ export async function logoutAction() {
   redirect("/login");
 }
 
-export async function syncHostingerSiteAction(): Promise<ActionState> {
+export async function verifyHostingerSiteAction(
+  _previous: HostingerVerificationActionState,
+  _formData: FormData,
+): Promise<HostingerVerificationActionState> {
+  void _previous;
+  void _formData;
   try {
-    const current = await requireOwner();
-    await synchronizeConfiguredSite(current.user.id);
-    revalidatePath("/overview");
-    revalidatePath("/site-settings");
-    return { ok: true, message: "Hostinger configuration verified." };
+    const current = await requireOwnerOnboarding();
+    if (current.user.role !== "OWNER" || current.user.isActive !== true) {
+      return {
+        ok: false,
+        status: "error",
+        code: "FORBIDDEN",
+        message: "Only the active OWNER can verify the configured site.",
+      };
+    }
+    const verified = await verifyConfiguredHostingerSite(current.user.id);
+    return {
+      ok: true,
+      status: "verified",
+      message: "Sito Hostinger verificato. Conferma prima dell’importazione.",
+      site: {
+        domain: verified.domain,
+        siteStatus: verified.siteStatus,
+        nodeEnabled: verified.nodeEnabled,
+        orderId: verified.orderId,
+      },
+    };
   } catch (error) {
-    return normalizeError(error);
+    return {
+      ...normalizeError(error),
+      status: "error",
+    };
   }
 }
 
-export async function syncHostingerSiteFormAction(): Promise<void> {
-  await syncHostingerSiteAction();
+export async function importHostingerSiteAction(
+  _previous: ActionState,
+  formData: FormData,
+): Promise<ActionState> {
+  try {
+    const current = await requireOwnerOnboarding();
+    if (current.user.role !== "OWNER" || current.user.isActive !== true) {
+      throw new AppError(
+        "FORBIDDEN",
+        "Only the active OWNER can import the configured site.",
+        403,
+      );
+    }
+
+    const configuration = getHostingerConfigurationState();
+    if (!configuration.configured) {
+      return {
+        ok: false,
+        code: "HOSTINGER_ERROR",
+        message:
+          configuration.status === "incomplete"
+            ? "La configurazione Hostinger è incompleta."
+            : "La configurazione Hostinger non è valida.",
+      };
+    }
+
+    const confirmation = z.string().max(253).parse(
+      formData.get("confirmationDomain"),
+    );
+    let confirmedDomain: string;
+    try {
+      confirmedDomain = normalizeDomain(confirmation);
+    } catch {
+      confirmedDomain = "";
+    }
+    if (confirmedDomain !== configuration.domain) {
+      await writeAuditEvent({
+        actorUserId: current.user.id,
+        operation: "hostinger_site_import_conflict",
+        targetType: "site",
+        targetIdentifier: configuration.domain,
+        result: "DENIED",
+        metadata: { reason: "confirmation_mismatch" },
+      });
+      return {
+        ok: false,
+        code: "VALIDATION_ERROR",
+        message: "Il dominio di conferma non corrisponde al sito configurato.",
+      };
+    }
+
+    // Discovery and Node.js capability are deliberately repeated immediately
+    // before the atomic write. Browser fields never select the Hostinger target.
+    const verified = await verifyConfiguredHostingerSite(current.user.id);
+    await importVerifiedConfiguredSite(current.user.id, verified);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return {
+        ok: false,
+        code: "VALIDATION_ERROR",
+        message: "Inserisci il dominio configurato per confermare.",
+      };
+    }
+    return normalizeError(error);
+  }
+
+  revalidatePath("/onboarding");
+  revalidatePath("/overview");
+  revalidatePath("/site-settings");
+  revalidatePath("/", "layout");
+  redirect("/overview");
 }

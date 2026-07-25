@@ -56,6 +56,21 @@ describe("authentication boundary architecture", () => {
     expect(onboarding).not.toContain("AUTH_SECRET");
   });
 
+  it("keeps the interactive onboarding payload limited to public state", () => {
+    const component = source(
+      "src/app/onboarding/hostinger-onboarding.tsx",
+    );
+    const actions = source("src/app/actions.ts");
+
+    expect(component).not.toContain("getHostingerEnv");
+    expect(component).not.toContain("process.env");
+    expect(component).not.toContain("HOSTINGER_API_TOKEN=");
+    expect(actions).not.toContain('formData.get("username")');
+    expect(actions).not.toContain('formData.get("token")');
+    expect(actions).not.toContain('formData.get("path")');
+    expect(actions).not.toContain('formData.get("method")');
+  });
+
   it("requires authoritative dashboard access at every dashboard page boundary", () => {
     const pages = [
       "src/app/(dashboard)/overview/page.tsx",

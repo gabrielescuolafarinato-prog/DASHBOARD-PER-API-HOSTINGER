@@ -7,11 +7,19 @@ export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
 
 export type HostingerWebsite = {
   domain: string;
-  username?: string;
+  username: string;
   orderId?: string;
-  status?: string;
-  nodeEnabled?: boolean;
-  raw: Record<string, unknown>;
+};
+
+export type ConfiguredWebsiteMatches = {
+  matches: HostingerWebsite[];
+  correlationId?: string;
+};
+
+export type NodeSiteProbe = {
+  nodeEnabled: true;
+  buildCount: number;
+  correlationId?: string;
 };
 
 type ClientOptions = {
@@ -21,27 +29,153 @@ type ClientOptions = {
   baseUrl?: string;
 };
 
-function errorMessage(payload: unknown, fallback: string) {
-  if (payload && typeof payload === "object" && "error" in payload) {
-    const value = (payload as { error?: unknown }).error;
-    if (typeof value === "string") return value;
-    if (value && typeof value === "object" && "message" in value) {
-      const message = (value as { message?: unknown }).message;
-      if (typeof message === "string") return message;
-    }
-  }
-  return fallback;
+type HostingerResponse = {
+  payload: unknown;
+  correlationId?: string;
+};
+
+const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
+
+function sanitizeCorrelationId(value: unknown) {
+  return typeof value === "string" && CORRELATION_ID_PATTERN.test(value)
+    ? value
+    : undefined;
 }
 
 function correlationId(response: Response, payload: unknown) {
   const header =
     response.headers.get("x-correlation-id") ??
     response.headers.get("correlation-id");
-  if (header) return header;
+  const safeHeader = sanitizeCorrelationId(header);
+  if (safeHeader) return safeHeader;
   if (payload && typeof payload === "object" && "correlation_id" in payload) {
-    const id = (payload as { correlation_id?: unknown }).correlation_id;
-    return typeof id === "string" ? id : undefined;
+    return sanitizeCorrelationId(
+      (payload as { correlation_id?: unknown }).correlation_id,
+    );
   }
+}
+
+function malformedResponse(correlationId?: string) {
+  return new AppError(
+    "HOSTINGER_ERROR",
+    "Hostinger returned an invalid response.",
+    502,
+    correlationId,
+  );
+}
+
+function httpError(status: number, id?: string) {
+  if (status === 401 || status === 403) {
+    return new AppError(
+      "HOSTINGER_ERROR",
+      "Hostinger credentials are invalid or insufficient.",
+      status,
+      id,
+    );
+  }
+  if (status === 404) {
+    return new AppError(
+      "NOT_FOUND",
+      "The configured Hostinger site was not found.",
+      404,
+      id,
+    );
+  }
+  if (status === 422) {
+    return new AppError(
+      "HOSTINGER_ERROR",
+      "Hostinger rejected the configured site request.",
+      422,
+      id,
+    );
+  }
+  if (status === 429) {
+    return new AppError(
+      "RATE_LIMITED",
+      "The Hostinger request is temporarily rate limited.",
+      429,
+      id,
+    );
+  }
+  if (status >= 500) {
+    return new AppError(
+      "HOSTINGER_ERROR",
+      "Hostinger is temporarily unavailable.",
+      503,
+      id,
+    );
+  }
+  return new AppError(
+    "HOSTINGER_ERROR",
+    "The Hostinger request could not be completed.",
+    502,
+    id,
+  );
+}
+
+function responseRecords(payload: unknown, id?: string) {
+  const container =
+    payload &&
+    typeof payload === "object" &&
+    !Array.isArray(payload) &&
+    "data" in payload
+      ? (payload as { data: unknown }).data
+      : payload;
+  if (!Array.isArray(container)) throw malformedResponse(id);
+  if (
+    container.some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item),
+    )
+  ) {
+    throw malformedResponse(id);
+  }
+  return container as Record<string, unknown>[];
+}
+
+function readWebsite(
+  item: Record<string, unknown>,
+  correlationId?: string,
+): HostingerWebsite {
+  const rawDomain =
+    typeof item.domain === "string"
+      ? item.domain
+      : typeof item.primary_domain === "string"
+        ? item.primary_domain
+        : undefined;
+  const username =
+    typeof item.username === "string"
+      ? item.username
+      : typeof item.hostinger_username === "string"
+        ? item.hostinger_username
+        : undefined;
+  if (!rawDomain || !username || !username.trim()) {
+    throw malformedResponse(correlationId);
+  }
+
+  let domain: string;
+  try {
+    domain = normalizeDomain(rawDomain);
+  } catch {
+    throw malformedResponse(correlationId);
+  }
+
+  const rawOrderId = item.order_id ?? item.orderId;
+  if (
+    rawOrderId !== undefined &&
+    typeof rawOrderId !== "string" &&
+    typeof rawOrderId !== "number"
+  ) {
+    throw malformedResponse(correlationId);
+  }
+
+  return {
+    domain,
+    username,
+    orderId:
+      rawOrderId === undefined || rawOrderId === ""
+        ? undefined
+        : String(rawOrderId),
+  };
 }
 
 export class HostingerClient {
@@ -55,17 +189,16 @@ export class HostingerClient {
     this.baseUrl = options.baseUrl ?? HOSTINGER_API_BASE_URL;
   }
 
-  private async request(path: string, init: RequestInit = {}) {
+  private async request(path: string): Promise<HostingerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        ...init,
+        method: "GET",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.options.token}`,
-          ...init.headers,
         },
         signal: controller.signal,
       });
@@ -75,78 +208,99 @@ export class HostingerClient {
         try {
           payload = JSON.parse(text);
         } catch {
-          throw new AppError(
-            "HOSTINGER_ERROR",
-            "Hostinger returned an invalid response.",
-            502,
-            response.headers.get("x-correlation-id") ?? undefined,
+          if (!response.ok) {
+            throw httpError(
+              response.status,
+              sanitizeCorrelationId(
+                response.headers.get("x-correlation-id"),
+              ),
+            );
+          }
+          throw malformedResponse(
+            sanitizeCorrelationId(
+              response.headers.get("x-correlation-id"),
+            ),
           );
         }
       }
-      if (!response.ok) {
-        const id = correlationId(response, payload);
-        if (response.status === 429) {
-          throw new AppError(
-            "RATE_LIMITED",
-            "Hostinger rate limit reached. Try again later.",
-            429,
-            id,
-          );
-        }
-        const status = response.status >= 500 ? 502 : response.status;
-        throw new AppError(
-          "HOSTINGER_ERROR",
-          errorMessage(payload, `Hostinger request failed (${response.status}).`),
-          status,
-          id,
-        );
-      }
-      return payload;
+
+      const id = correlationId(response, payload);
+      if (!response.ok) throw httpError(response.status, id);
+      return { payload, correlationId: id };
     } catch (error) {
       if (error instanceof AppError) throw error;
       if (error instanceof Error && error.name === "AbortError") {
-        throw new AppError("HOSTINGER_ERROR", "Hostinger request timed out.", 504);
+        throw new AppError(
+          "HOSTINGER_ERROR",
+          "The Hostinger request timed out.",
+          504,
+        );
       }
-      throw new AppError("HOSTINGER_ERROR", "Hostinger is unreachable.", 502);
+      throw new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger is temporarily unreachable.",
+        503,
+      );
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  async listWebsitesByDomain(domain: string): Promise<HostingerWebsite[]> {
-    const normalized = normalizeDomain(domain);
-    const payload = await this.request(
-      `/api/hosting/v1/websites?domain=${encodeURIComponent(normalized)}`,
+  async listWebsitesForConfiguredSite(
+    configuredDomain: string,
+    configuredUsername: string,
+  ): Promise<ConfiguredWebsiteMatches> {
+    const domain = normalizeDomain(configuredDomain);
+    const parameters = new URLSearchParams({
+      domain,
+      username: configuredUsername,
+    });
+    const response = await this.request(
+      `/api/hosting/v1/websites?${parameters.toString()}`,
     );
-    const container =
-      payload && typeof payload === "object" && "data" in payload
-        ? (payload as { data: unknown }).data
-        : payload;
-    const records = Array.isArray(container) ? container : [];
-    return records
-      .filter((item): item is Record<string, unknown> => !!item && typeof item === "object")
-      .map((item) => ({
-        domain: String(item.domain ?? item.primary_domain ?? ""),
-        username:
-          typeof item.username === "string"
-            ? item.username
-            : typeof item.hostinger_username === "string"
-              ? item.hostinger_username
-              : undefined,
-        orderId:
-          typeof item.order_id === "string" ? item.order_id : undefined,
-        status: typeof item.status === "string" ? item.status : undefined,
-        nodeEnabled:
-          typeof item.node_enabled === "boolean" ? item.node_enabled : undefined,
-        raw: item,
-      }))
-      .filter((site) => normalizeDomain(site.domain) === normalized);
+    const records = responseRecords(
+      response.payload,
+      response.correlationId,
+    );
+    const matches = records
+      .map((item) => readWebsite(item, response.correlationId))
+      .filter(
+        (site) =>
+          site.domain === domain &&
+          site.username === configuredUsername,
+      );
+    return { matches, correlationId: response.correlationId };
+  }
+
+  async verifyConfiguredNodeSite(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<NodeSiteProbe> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(domain)}/nodejs/builds`,
+    );
+    const records = responseRecords(
+      response.payload,
+      response.correlationId,
+    );
+    return {
+      nodeEnabled: true,
+      buildCount: records.length,
+      correlationId: response.correlationId,
+    };
   }
 }
 
 export function createHostingerClient() {
   const env = getHostingerEnv();
-  if (!env.HOSTINGER_API_TOKEN) {
+  if (
+    !env.HOSTINGER_API_TOKEN ||
+    !env.HOSTINGER_ACCOUNT_USERNAME ||
+    !env.HOSTINGER_SITE_DOMAIN
+  ) {
     throw new AppError(
       "HOSTINGER_ERROR",
       "Hostinger is not configured.",

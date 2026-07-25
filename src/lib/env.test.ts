@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   getApplicationSetupStatus,
+  getHostingerConfigurationState,
   getRuntimeEnv,
   parseCoreEnv,
   parseHostingerEnv,
@@ -32,6 +33,7 @@ describe("environment validation", () => {
       databaseConfigured: false,
       authenticationConfigured: false,
       hostingerConfigured: false,
+      hostinger: { status: "unconfigured", configured: false },
     });
   });
 
@@ -52,8 +54,63 @@ describe("environment validation", () => {
     ).toThrow(/must be configured together/);
   });
 
+  it("reports partial Hostinger configuration without exposing values", () => {
+    expect(
+      getHostingerConfigurationState({
+        HOSTINGER_API_TOKEN: "must-not-be-returned",
+      }),
+    ).toEqual({ status: "incomplete", configured: false });
+    expect(
+      JSON.stringify(
+        getHostingerConfigurationState({
+          HOSTINGER_API_TOKEN: "must-not-be-returned",
+        }),
+      ),
+    ).not.toContain("must-not-be-returned");
+  });
+
   it("accepts Hostinger as entirely unconfigured", () => {
     expect(parseHostingerEnv({})).toEqual({});
+    expect(getHostingerConfigurationState({})).toEqual({
+      status: "unconfigured",
+      configured: false,
+    });
+  });
+
+  it("accepts and safely publishes a complete Hostinger group", () => {
+    const source = {
+      HOSTINGER_API_TOKEN: "server-secret",
+      HOSTINGER_ACCOUNT_USERNAME: "u123456",
+      HOSTINGER_SITE_DOMAIN: " MÜNICH.Example. ",
+    };
+    expect(parseHostingerEnv(source)).toEqual({
+      HOSTINGER_API_TOKEN: "server-secret",
+      HOSTINGER_ACCOUNT_USERNAME: "u123456",
+      HOSTINGER_SITE_DOMAIN: "xn--mnich-kva.example",
+    });
+    const publicState = getHostingerConfigurationState(source);
+    expect(publicState).toEqual({
+      status: "ready",
+      configured: true,
+      domain: "xn--mnich-kva.example",
+    });
+    expect(JSON.stringify(publicState)).not.toContain("server-secret");
+    expect(JSON.stringify(publicState)).not.toContain("u123456");
+  });
+
+  it.each([
+    "https://example.com",
+    "*.example.com",
+    "example.com/path",
+    "example.com:443",
+    "user@example.com",
+  ])("reports invalid complete Hostinger domain %s", (domain) => {
+    const state = getHostingerConfigurationState({
+      HOSTINGER_API_TOKEN: "server-secret",
+      HOSTINGER_ACCOUNT_USERNAME: "u123456",
+      HOSTINGER_SITE_DOMAIN: domain,
+    });
+    expect(state).toEqual({ status: "invalid", configured: false });
   });
 
   it("rejects the documented secret placeholder", () => {

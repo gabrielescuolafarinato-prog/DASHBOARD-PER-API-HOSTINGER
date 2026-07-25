@@ -1,11 +1,10 @@
 import { eq } from "drizzle-orm";
-import { KeyRound, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { KeyRound, Server, ShieldCheck } from "lucide-react";
 import { getDb } from "@/db";
 import { sites } from "@/db/schema";
 import { requireDashboardSession } from "@/lib/auth/session";
-import { getHostingerEnv } from "@/lib/env";
-import { syncHostingerSiteFormAction } from "@/app/actions";
-import { Badge, Card, PageHeading, primaryButtonClass } from "@/components/ui";
+import { getApplicationSetupStatus } from "@/lib/env";
+import { Badge, Card, PageHeading } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
 
 export const metadata = { title: "Site settings" };
@@ -26,8 +25,7 @@ export default async function SiteSettingsPage() {
     .from(sites)
     .where(eq(sites.id, current.site.siteId))
     .limit(1);
-  const env = getHostingerEnv();
-  const configured = Boolean(env.HOSTINGER_API_TOKEN);
+  const configured = getApplicationSetupStatus().hostingerConfigured;
 
   return (
     <>
@@ -48,8 +46,8 @@ export default async function SiteSettingsPage() {
           </div>
           <dl className="mt-6 divide-y divide-slate-100 text-sm">
             <Row label="Name" value={site?.name ?? "Not configured"} />
-            <Row label="Primary domain" value={site?.domain ?? env.HOSTINGER_SITE_DOMAIN ?? "Not configured"} />
-            <Row label="Hosting username" value={site?.username ?? env.HOSTINGER_ACCOUNT_USERNAME ?? "Not configured"} />
+            <Row label="Primary domain" value={site?.domain ?? "Not configured"} />
+            <Row label="Hosting username" value={site?.username ?? "Not configured"} />
             <Row label="Order binding" value={site?.orderId ?? "Not discovered"} />
             <Row label="Node.js" value={site?.nodeEnabled ? "Enabled" : "Not verified"} />
             <Row label="Last synchronization" value={formatDate(site?.lastSyncedAt)} />
@@ -78,15 +76,10 @@ export default async function SiteSettingsPage() {
                 </p>
               </div>
             </div>
-            {current.user.role === "OWNER" ? (
-              <form action={syncHostingerSiteFormAction} className="mt-5">
-                <button className={primaryButtonClass} disabled={!configured}>
-                  <RefreshCw className="size-4" /> Verify configuration
-                </button>
-              </form>
-            ) : (
-              <p className="mt-4 text-xs text-slate-400">Owner access is required to synchronize.</p>
-            )}
+            <p className="mt-4 text-xs leading-5 text-slate-400">
+              The site identity was verified during OWNER onboarding. No
+              operational Hostinger action is exposed in this module yet.
+            </p>
           </Card>
         </div>
       </div>

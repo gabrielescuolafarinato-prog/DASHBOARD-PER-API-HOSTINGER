@@ -5,13 +5,14 @@ import {
   Clock3,
   Database,
   Globe2,
+  Server,
   ShieldAlert,
   Users,
 } from "lucide-react";
 import { getDb } from "@/db";
 import { sites, user } from "@/db/schema";
 import { requireDashboardSession } from "@/lib/auth/session";
-import { getHostingerEnv } from "@/lib/env";
+import { getApplicationSetupStatus } from "@/lib/env";
 import { listCapabilities } from "@/lib/hostinger/capabilities";
 import { Badge, Card, PageHeading } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
@@ -28,6 +29,7 @@ export default async function OverviewPage() {
       name: sites.name,
       domain: sites.primaryDomain,
       status: sites.status,
+      nodeEnabled: sites.nodeEnabled,
       lastSyncedAt: sites.lastSyncedAt,
     })
     .from(sites)
@@ -37,7 +39,7 @@ export default async function OverviewPage() {
     .select({ activeUsers: count() })
     .from(user)
     .where(eq(user.isActive, true));
-  const hostinger = getHostingerEnv();
+  const { hostingerConfigured } = getApplicationSetupStatus();
   const capabilities = listCapabilities();
   const planned = capabilities.filter((item) => item.state === "PLANNED").length;
   const implemented = capabilities.filter((item) => item.state === "IMPLEMENTED").length;
@@ -101,8 +103,15 @@ export default async function OverviewPage() {
                 <strong className="ml-auto text-emerald-700">Connected</strong>
               </div>
               <div className="flex items-center gap-3 text-sm">
+                <Server className="size-4 text-emerald-600" />
+                <span className="text-slate-500">Node.js</span>
+                <strong className="ml-auto text-emerald-700">
+                  {site?.nodeEnabled ? "Active" : "Not verified"}
+                </strong>
+              </div>
+              <div className="flex items-center gap-3 text-sm">
                 <Clock3 className="size-4 text-slate-400" />
-                <span className="text-slate-500">Last sync</span>
+                <span className="text-slate-500">Last verification</span>
                 <strong className="ml-auto text-slate-700">{formatDate(site?.lastSyncedAt)}</strong>
               </div>
             </div>
@@ -115,8 +124,17 @@ export default async function OverviewPage() {
             <StatusRow label="Authentication" detail="Persistent DB sessions" ok />
             <StatusRow
               label="Hostinger API"
-              detail={hostinger.HOSTINGER_API_TOKEN ? "Server credential configured" : "Hostinger not configured"}
-              ok={Boolean(hostinger.HOSTINGER_API_TOKEN)}
+              detail={
+                hostingerConfigured && site?.status === "VERIFIED"
+                  ? "Configured site connection verified"
+                  : "Hostinger setup needs attention"
+              }
+              ok={hostingerConfigured && site?.status === "VERIFIED"}
+            />
+            <StatusRow
+              label="Future capabilities"
+              detail="Builds and logs are registered but not implemented"
+              ok={false}
             />
           </div>
         </Card>

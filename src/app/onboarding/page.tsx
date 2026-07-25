@@ -1,15 +1,17 @@
-import { CheckCircle2, LogOut, Server, Settings } from "lucide-react";
+import { CheckCircle2, LogOut, Settings, ShieldCheck } from "lucide-react";
 import { logoutAction } from "@/app/actions";
 import { Badge, Card, primaryButtonClass } from "@/components/ui";
 import { requireOwnerOnboarding } from "@/lib/auth/session";
 import { getApplicationSetupStatus } from "@/lib/env";
+import { HostingerOnboarding } from "./hostinger-onboarding";
+import { HostingerVariableList } from "./hostinger-variable-list";
 
 export const metadata = { title: "Configurazione iniziale" };
 export const dynamic = "force-dynamic";
 
 export default async function OnboardingPage() {
   const current = await requireOwnerOnboarding();
-  const { hostingerConfigured } = getApplicationSetupStatus();
+  const { hostinger } = getApplicationSetupStatus();
 
   return (
     <main className="grid min-h-screen place-items-center p-6 sm:p-10">
@@ -53,23 +55,22 @@ export default async function OnboardingPage() {
               </p>
             </div>
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-5">
-              <Server className="size-5 text-slate-700" aria-hidden="true" />
+              <ShieldCheck className="size-5 text-slate-700" aria-hidden="true" />
               <p className="mt-4 text-sm font-bold text-slate-950">
-                Configurazione Hostinger
+                Confine single-site
               </p>
-              <div className="mt-2">
-                <Badge tone={hostingerConfigured ? "success" : "warning"}>
-                  {hostingerConfigured ? "Configurata" : "Non configurata"}
-                </Badge>
-              </div>
+              <p className="mt-1 text-xs leading-5 text-slate-600">
+                Discovery, verifica Node.js e importazione restano vincolati al
+                target configurato dal server.
+              </p>
             </div>
           </div>
 
-          <p className="mt-7 text-sm leading-6 text-slate-500">
-            Il sito reale verrà verificato, importato e associato all’account
-            in una fase successiva. Questa pagina non effettua chiamate
-            Hostinger e non crea risorse provvisorie.
-          </p>
+          <HostingerOnboarding configuration={hostinger} />
+          {hostinger.status === "unconfigured" ||
+          hostinger.status === "incomplete" ? (
+            <HostingerVariableList />
+          ) : null}
 
           <form action={logoutAction} className="mt-8 border-t border-slate-100 pt-6">
             <button type="submit" className={primaryButtonClass}>

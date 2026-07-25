@@ -1,6 +1,6 @@
 # Hostinger Single-Site Console
 
-Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only e policy capability default-deny. Le capability operative Hostinger, oltre alla verifica iniziale del sito, non sono ancora esposte.
+Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato e policy capability default-deny. Le capability operative Hostinger successive all’importazione non sono ancora esposte.
 
 ## Stack e requisiti
 
@@ -81,7 +81,32 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | `VERCEL_BRANCH_URL` | Automatica; alias del branch Git | Vercel | Non segreta | `project-git-main-team.vercel.app` | Vercel |
 | `VERCEL_PROJECT_PRODUCTION_URL` | Automatica | Vercel | Non segreta | `project.vercel.app` | Vercel |
 
-Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti. Se il gruppo è assente, l’onboarding o la dashboard mostrano **Hostinger non configurato** e non effettuano chiamate Hostinger.
+Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti:
+
+- `HOSTINGER_API_TOKEN` è un secret esclusivamente server-side: non usare mai il
+  prefisso `NEXT_PUBLIC_`, non inserirlo in props, form o repository;
+- `HOSTINGER_ACCOUNT_USERNAME` identifica l’account hosting da confrontare in
+  modo esatto;
+- `HOSTINGER_SITE_DOMAIN` deve essere un hostname, non un URL. Protocollo,
+  credenziali, porta, path, query, fragment, wildcard e caratteri di controllo
+  vengono rifiutati. Gli IDN sono convertiti nella forma ASCII canonica e il
+  confronto resta esatto, senza trasformare sottodomini.
+
+Se il gruppo è assente, l’onboarding mostra **Hostinger non configurato** e non
+effettua chiamate. Se è parziale mostra **Configurazione incompleta** e non
+effettua chiamate. Quando è completo, il browser riceve soltanto il dominio
+normalizzato; token e username non vengono serializzati.
+
+Dopo qualsiasi modifica al gruppo in Vercel è necessario creare un nuovo
+deployment. Per una futura rotazione del token:
+
+1. crea un nuovo token in hPanel con i soli permessi necessari;
+2. sostituisci `HOSTINGER_API_TOKEN` nei soli ambienti Vercel interessati;
+3. crea un nuovo deployment e valida il token con una verifica server-side
+   non distruttiva in un ambiente controllato;
+4. revoca il token precedente in hPanel solo dopo il controllo, mantenendo
+   disponibile il rollback alla variabile precedente fino a quel momento;
+5. non copiare mai il token nei log, ticket, commit o variabili `NEXT_PUBLIC_`.
 
 `AUTH_SECRET` deve contenere almeno 32 caratteri ad alta entropia. Placeholder noti e valori con varietà insufficiente vengono rifiutati.
 
@@ -120,6 +145,13 @@ Per le Preview Vercel è consigliato un branch Neon separato e un `AUTH_SECRET` 
 ## Neon e migration
 
 Il runtime usa `drizzle-orm/neon-http`, senza pool TCP persistente. La connessione viene costruita in modo lazy e riutilizzata nell’istanza serverless; nessuna query viene eseguita durante la build.
+
+Il driver HTTP non supporta transazioni callback interattive. Per questo
+l’importazione iniziale viene espressa come una sola istruzione PostgreSQL con
+CTE: PostgreSQL la esegue atomicamente, mentre
+`pg_advisory_xact_lock` serializza gli import single-site concorrenti. Site,
+membership, binding e audit vengono quindi confermati insieme oppure
+interamente annullati.
 
 Le migration CLI usano invece `pg` (`node-postgres`) con
 `drizzle-orm/node-postgres`. Questa separazione evita la selezione automatica
@@ -222,8 +254,47 @@ Lo script:
 - non crea siti o membership provvisorie.
 
 Il primo OWNER senza membership viene indirizzato a `/onboarding`. Il sito e la
-membership OWNER saranno creati soltanto dopo una futura verifica autorizzata
-del sito reale tramite Hostinger.
+membership amministrativa vengono creati soltanto dopo discovery esatto,
+capability probe Node.js e conferma esplicita.
+
+## Onboarding Hostinger e importazione
+
+Il flusso `/onboarding` è disponibile soltanto a un OWNER attivo nello stato
+`owner_onboarding_required`:
+
+1. la pagina mostra lo stato pubblico del gruppo Hostinger e, quando completo,
+   il solo dominio canonico;
+2. **Verifica sito Hostinger** chiama
+   `GET /api/hosting/v1/websites` con dominio e username provenienti dalla
+   configurazione server;
+3. la risposta viene validata e post-filtrata localmente per dominio
+   normalizzato e username esatti;
+4. zero corrispondenze restituiscono “sito configurato non trovato”; più
+   corrispondenze falliscono in modo chiuso come ambigue;
+5. una sola corrispondenza viene verificata come Node.js tramite
+   `GET /api/hosting/v1/accounts/{username}/websites/{domain}/nodejs/builds`;
+   anche un elenco build vuoto conferma la capability;
+6. il browser vede soltanto dominio, stato, flag Node.js e l’eventuale order ID
+   della corrispondenza selezionata;
+7. l’OWNER digita il dominio configurato come conferma. Questo input non viene
+   mai usato per costruire la richiesta Hostinger;
+8. discovery e probe vengono ripetuti server-side subito prima del salvataggio;
+9. sito `VERIFIED`, membership `ADMIN`, binding del dominio principale e audit
+   vengono scritti in un’unica istruzione PostgreSQL atomica;
+10. dopo il successo l’accesso viene ricalcolato e l’OWNER viene reindirizzato
+    una sola volta a `/overview`.
+
+Le Server Actions ricontrollano sessione, utente attivo, ruolo, stato
+onboarding, configurazione e conferma. Next.js applica la protezione same-origin
+alle Server Actions; doppio click e submit concorrenti sono inoltre contenuti
+dalla UI, da un advisory lock transazionale PostgreSQL e dai vincoli univoci.
+Non viene usato un rate limiter o un flag globale in memoria.
+
+L’importazione è idempotente per stesso OWNER e stesso sito. Un sito differente,
+uno username incompatibile o una membership verso un altro sito producono un
+conflitto e non sostituiscono né eliminano record esistenti. La risposta grezza,
+gli altri siti del piano, altri username e order ID non selezionati non
+raggiungono mai il client, il database o l’audit.
 
 ## Autenticazione e confine single-site
 
@@ -243,6 +314,9 @@ del sito reale tramite Hostinger.
 - Sito, username, dominio ed external ID vengono risolti dal server.
 - Capability non registrate vengono negate.
 - Non esiste un proxy Hostinger generico.
+- L’Overview mostra soltanto identità del sito, dominio, stato `VERIFIED`,
+  Node.js attivo, connessione Hostinger e data dell’ultima verifica. Build, log,
+  DNS e database Hostinger restano non implementati.
 
 ## GitHub Actions
 
@@ -281,8 +355,18 @@ Il workflow non imposta variabili applicative o secret. Il build verifica quindi
 7. Esegui `npm run db:migrate` contro il database scelto.
 8. Imposta temporaneamente le variabili bootstrap ed esegui `npm run user:bootstrap`.
 9. Avvia un nuovo deployment Vercel: le modifiche alle variabili non aggiornano deployment già completati.
-10. Verifica login, onboarding OWNER, cookie sicuri, logout e pagine protette.
-11. Per un futuro dominio personalizzato, aggiorna `APP_URL` e avvia un ulteriore redeploy.
+10. In Vercel → Project → Settings → Environment Variables aggiungi
+    `HOSTINGER_API_TOKEN`, `HOSTINGER_ACCOUNT_USERNAME` e
+    `HOSTINGER_SITE_DOMAIN` a **Production**, tutte nello stesso intervento.
+    Il dominio deve essere un hostname senza `https://`, path o porta.
+11. Avvia un nuovo deployment Production.
+12. Accedi come OWNER, apri `/onboarding`, premi **Verifica sito Hostinger** e
+    controlla il riepilogo della sola corrispondenza.
+13. Digita il dominio mostrato, premi **Conferma e importa sito** e verifica il
+    redirect a `/overview`.
+14. Verifica login, cookie sicuri, logout e pagine protette.
+15. Per un futuro dominio personalizzato dell’app, aggiorna `APP_URL` e avvia
+    un ulteriore redeploy.
 
 Non è necessario `vercel.json`.
 
@@ -304,11 +388,18 @@ Non è necessario `vercel.json`.
 - Email delivery e recupero password non sono configurati.
 - La sincronizzazione Hostinger reale deve essere provata con un token di staging/non distruttivo.
 - Preview e Production devono usare database e secret appropriati ai rispettivi ambienti.
+- I test automatici usano mock completi e non effettuano chiamate Hostinger o
+  Neon Production.
+- La release corrente non espone un pulsante di riverifica dopo
+  l’onboarding; il modulo read-only successivo dovrà includere un health check
+  OWNER sicuro da usare anche durante la rotazione del token.
 
 ## Prossima fase suggerita
 
-Implementare il flusso OWNER autorizzato che valida le tre variabili Hostinger,
-seleziona con exact match il sito reale, crea il record `sites` `VERIFIED` e la
-sola membership OWNER. Dopo questa associazione, verificare il passaggio
-automatico da `/onboarding` a `/overview`. Soltanto in seguito aggiungere le
-capability read-only per build Node.js e build log.
+Implementare prima una capability read-only per elencare le build Node.js del
+solo sito già importato. Gli UUID build devono essere validati e, se necessario,
+associati al sito prima di esporre una lettura dei log. Mantenere endpoint
+specifici server-only, payload minimali, audit senza contenuti dei log,
+paginazione controllata, gestione 429/5xx e default-deny. Solo dopo questi
+vincoli aggiungere la lettura del singolo build log; nessuna operazione di
+deploy, restart o modifica va accorpata al modulo read-only.

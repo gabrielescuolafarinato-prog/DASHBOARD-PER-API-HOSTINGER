@@ -64,6 +64,9 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | Nome | Obbligatorietà | Ambiente | Sensibilità | Esempio non reale | Provenienza |
 | --- | --- | --- | --- | --- | --- |
 | `DATABASE_URL` | Obbligatoria a runtime; non richiesta dal build | Local, Preview, Production | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Neon → Connection details |
+| `DATABASE_MIGRATION_URL` | Opzionale; prima scelta del solo runner migration | Shell locale/CI amministrativa | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Override amministrativo |
+| `DATABASE_URL_UNPOOLED` | Opzionale; fallback migration preferito | Local/integrazione Vercel | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Neon/Vercel |
+| `POSTGRES_URL_NON_POOLING` | Opzionale; secondo fallback migration | Local/integrazione Vercel | Segreta | `postgresql://USER:PASSWORD@HOST/DB?sslmode=require` | Neon/Vercel |
 | `AUTH_SECRET` | Obbligatoria a runtime; non richiesta dal build | Local, Preview, Production | Segreta | `generated-high-entropy-value-minimum-32-chars` | `openssl rand -base64 48` |
 | `APP_URL` | Locale e dominio canonico; calcolabile su Vercel | Local, Production, dominio custom | Non segreta | `https://dashboard.example.com` | URL dell’app |
 | `HOSTINGER_API_TOKEN` | Opzionale, ma in gruppo | Production; normalmente assente in Preview | Segreta | Vuoto nel repository | hPanel Hostinger |
@@ -112,20 +115,60 @@ Per le Preview Vercel è consigliato un branch Neon separato e un `AUTH_SECRET` 
 
 Il runtime usa `drizzle-orm/neon-http`, senza pool TCP persistente. La connessione viene costruita in modo lazy e riutilizzata nell’istanza serverless; nessuna query viene eseguita durante la build.
 
+Le migration CLI usano invece `pg` (`node-postgres`) con
+`drizzle-orm/node-postgres`. Questa separazione evita la selezione automatica
+del driver WebSocket di Drizzle Kit quando il comando viene eseguito da Node.js
+locale. Il runner usa TLS, una sola connessione e chiude sempre il pool.
+
+Il runner sceglie la prima variabile non vuota in quest’ordine:
+
+1. `DATABASE_MIGRATION_URL`;
+2. `DATABASE_URL_UNPOOLED`;
+3. `POSTGRES_URL_NON_POOLING`;
+4. `DATABASE_URL`.
+
+L’URL unpooled è preferito perché il runner è un processo amministrativo breve
+che gestisce già un pool locale da una sola connessione. Non è necessario
+aggiungere `DATABASE_MIGRATION_URL` a Vercel quando l’integrazione fornisce già
+`DATABASE_URL_UNPOOLED` o `POSTGRES_URL_NON_POOLING`. Questa selezione è
+indipendente da `DATABASE_URL`, che resta la configurazione del runtime Neon
+HTTP.
+
 Le migration correnti sono:
 
 1. `0000_good_lady_bullseye.sql`: schema iniziale, vincoli, foreign key e indici.
 2. `0001_public_sway.sql`: indici univoci case-insensitive per email e dominio.
 
-Drizzle registra le migration applicate nella propria tabella journal: rieseguire `npm run db:migrate` applica solo quelle pendenti.
+Drizzle registra le migration applicate in
+`drizzle.__drizzle_migrations`: rieseguire `npm run db:migrate` è idempotente e
+applica solo quelle pendenti. Prima di applicarle, il runner verifica la
+connessione con `SELECT 1`; dopo l’applicazione verifica che la tabella esista e
+che il numero di righe corrisponda al journal versionato locale. Un successo
+viene restituito soltanto dopo queste verifiche e la chiusura del pool.
 
-Il CLI carica prima `.env.local` e poi `.env`, senza stampare i valori. Per modifiche future allo schema:
+Il CLI carica prima `.env.local` e poi `.env`, senza sovrascrivere variabili già
+impostate nel processo e senza stampare valori o dettagli di connessione. Per
+eseguire le migration e controllare il vero exit code in PowerShell:
+
+```powershell
+npm run db:migrate
+$LASTEXITCODE
+```
+
+Il valore atteso è `0`; ogni errore di configurazione, connessione, migration,
+verifica o chiusura restituisce `1` con diagnostica sanificata.
+
+Per modifiche future allo schema, il flusso obbligatorio resta:
 
 ```bash
 npm run db:generate
 # controllare manualmente il nuovo SQL
 npm run db:migrate
 ```
+
+Non usare `drizzle-kit push` sul database Production. Le modifiche devono
+passare da schema TypeScript, `drizzle-kit generate`, revisione SQL e runner
+programmatico `npm run db:migrate`.
 
 ## Bootstrap del primo OWNER
 
@@ -145,6 +188,19 @@ $env:BOOTSTRAP_OWNER_EMAIL="owner@example.com"
 $env:BOOTSTRAP_OWNER_NAME="Site Owner"
 $env:BOOTSTRAP_OWNER_PASSWORD="A-strong-password-123!"
 npm run user:bootstrap
+```
+
+Dopo avere completato sia migration sia bootstrap, elimina la copia locale dei
+secret. Il file è ignorato da Git, ma resta comunque materiale sensibile:
+
+```powershell
+Remove-Item -LiteralPath .env.local
+```
+
+Su macOS/Linux:
+
+```bash
+rm -- .env.local
 ```
 
 Sono supportati anche `--email=`, `--name=` e `--password=`, ma la password sulla riga di comando può essere visibile nell’elenco processi: preferire variabili temporanee o un secret manager.

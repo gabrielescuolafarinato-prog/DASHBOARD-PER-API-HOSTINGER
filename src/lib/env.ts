@@ -2,6 +2,13 @@ import { z } from "zod";
 
 export type EnvironmentSource = Record<string, string | undefined>;
 
+export const MIGRATION_DATABASE_URL_NAMES = [
+  "DATABASE_MIGRATION_URL",
+  "DATABASE_URL_UNPOOLED",
+  "POSTGRES_URL_NON_POOLING",
+  "DATABASE_URL",
+] as const;
+
 export class ServerEnvironmentError extends Error {
   readonly code = "SERVER_ENVIRONMENT_INVALID";
 
@@ -132,6 +139,25 @@ export function parseDatabaseEnv(source: EnvironmentSource) {
   });
   if (!result.success) throw formatError(result.error);
   return result.data;
+}
+
+export function parseMigrationEnv(source: EnvironmentSource) {
+  for (const name of MIGRATION_DATABASE_URL_NAMES) {
+    const connectionString = source[name]?.trim();
+    if (!connectionString) continue;
+
+    if (!/^postgres(?:ql)?:\/\//i.test(connectionString)) {
+      throw new ServerEnvironmentError(
+        `${name}: must be a PostgreSQL connection URL`,
+      );
+    }
+
+    return { connectionString, source: name } as const;
+  }
+
+  throw new ServerEnvironmentError(
+    `one of ${MIGRATION_DATABASE_URL_NAMES.join(", ")} is required for migrations`,
+  );
 }
 
 export function parseAuthEnv(source: EnvironmentSource) {

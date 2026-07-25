@@ -7,3 +7,6 @@ coverage/
 *.log
 .vercel/
 tsconfig.tsbuildinfo
+
+.vercel
+.env*

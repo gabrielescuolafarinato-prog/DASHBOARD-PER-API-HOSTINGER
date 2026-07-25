@@ -91,7 +91,7 @@ export default async function OverviewPage() {
               </span>
               <div>
                 <h2 className="text-lg font-bold text-slate-950">{site?.name ?? "No site configured"}</h2>
-                <p className="mt-1 text-sm text-slate-500">{site?.domain ?? "Run the OWNER bootstrap with Hostinger variables."}</p>
+                <p className="mt-1 text-sm text-slate-500">{site?.domain ?? "Complete the authorized Hostinger site import."}</p>
               </div>
             </div>
             <div className="mt-6 grid gap-3 border-t border-slate-100 pt-5 sm:grid-cols-2">

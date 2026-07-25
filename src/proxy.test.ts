@@ -41,6 +41,7 @@ describe("protected pages", () => {
   it("identifies every dashboard area as protected", () => {
     expect(isProtectedPath("/team")).toBe(true);
     expect(isProtectedPath("/audit-log")).toBe(true);
+    expect(isProtectedPath("/onboarding")).toBe(true);
     expect(isProtectedPath("/login")).toBe(false);
   });
 
@@ -75,6 +76,27 @@ describe("protected pages", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("location")).toBeNull();
     expect(config.matcher.join(" ")).not.toContain("/login");
+  });
+
+  it("applies setup and anonymous precedence to onboarding", () => {
+    delete process.env.DATABASE_URL;
+    delete process.env.AUTH_SECRET;
+    const setupResponse = proxy(
+      new NextRequest("https://console.test/onboarding"),
+    );
+    expect(setupResponse.status).toBe(307);
+    expect(setupResponse.headers.get("location")).toBe(
+      "https://console.test/setup-required",
+    );
+
+    configureApplication();
+    const anonymousResponse = proxy(
+      new NextRequest("https://console.test/onboarding"),
+    );
+    expect(anonymousResponse.status).toBe(307);
+    expect(anonymousResponse.headers.get("location")).toBe(
+      "https://console.test/login",
+    );
   });
 
   it("lets change-password through when the optimistic cookie is present", () => {

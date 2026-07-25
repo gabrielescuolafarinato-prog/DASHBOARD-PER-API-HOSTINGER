@@ -81,7 +81,7 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | `VERCEL_BRANCH_URL` | Automatica; alias del branch Git | Vercel | Non segreta | `project-git-main-team.vercel.app` | Vercel |
 | `VERCEL_PROJECT_PRODUCTION_URL` | Automatica | Vercel | Non segreta | `project.vercel.app` | Vercel |
 
-Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti. Se il gruppo è assente, la dashboard mostra **Hostinger non configurato** e non effettua chiamate Hostinger.
+Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti. Se il gruppo è assente, l’onboarding o la dashboard mostrano **Hostinger non configurato** e non effettuano chiamate Hostinger.
 
 `AUTH_SECRET` deve contenere almeno 32 caratteri ad alta entropia. Placeholder noti e valori con varietà insufficiente vengono rifiutati.
 
@@ -218,7 +218,12 @@ Lo script:
 - non stampa la password;
 - termina con exit code non zero in caso di errore;
 - elimina l’utente appena creato se la creazione delle credenziali fallisce;
-- crea la membership iniziale se il gruppo Hostinger è configurato.
+- non richiede variabili Hostinger;
+- non crea siti o membership provvisorie.
+
+Il primo OWNER senza membership viene indirizzato a `/onboarding`. Il sito e la
+membership OWNER saranno creati soltanto dopo una futura verifica autorizzata
+del sito reale tramite Hostinger.
 
 ## Autenticazione e confine single-site
 
@@ -229,6 +234,11 @@ Lo script:
 - Disabilitare un collaboratore revoca immediatamente tutte le sue sessioni.
 - Password temporanea generata con `crypto.randomBytes` e restituita una sola volta.
 - Cambio password obbligatorio e revoca delle altre sessioni.
+- OWNER attivo senza membership indirizzato all’onboarding, senza accesso alle
+  pagine dashboard.
+- COLLABORATOR senza membership negato secondo la policy not-found esistente.
+- Una sola membership verso un sito `VERIFIED` abilita la dashboard; membership
+  multiple, orfane o verso siti non utilizzabili falliscono in modo chiuso.
 - `OWNER` e `COLLABORATOR` avranno gli stessi permessi operativi sul sito; solo configurazione e gestione utenti restano OWNER-only.
 - Sito, username, dominio ed external ID vengono risolti dal server.
 - Capability non registrate vengono negate.
@@ -271,7 +281,7 @@ Il workflow non imposta variabili applicative o secret. Il build verifica quindi
 7. Esegui `npm run db:migrate` contro il database scelto.
 8. Imposta temporaneamente le variabili bootstrap ed esegui `npm run user:bootstrap`.
 9. Avvia un nuovo deployment Vercel: le modifiche alle variabili non aggiornano deployment già completati.
-10. Verifica login, cookie sicuri, logout e pagine protette.
+10. Verifica login, onboarding OWNER, cookie sicuri, logout e pagine protette.
 11. Per un futuro dominio personalizzato, aggiorna `APP_URL` e avvia un ulteriore redeploy.
 
 Non è necessario `vercel.json`.
@@ -297,4 +307,8 @@ Non è necessario `vercel.json`.
 
 ## Prossima fase suggerita
 
-Implementare prima le capability read-only per build Node.js e build log, con binding dei build UUID, `requireSiteAccess`, audit e test mock, prima di aggiungere qualsiasi controllo mutativo.
+Implementare il flusso OWNER autorizzato che valida le tre variabili Hostinger,
+seleziona con exact match il sito reale, crea il record `sites` `VERIFIED` e la
+sola membership OWNER. Dopo questa associazione, verificare il passaggio
+automatico da `/onboarding` a `/overview`. Soltanto in seguito aggiungere le
+capability read-only per build Node.js e build log.

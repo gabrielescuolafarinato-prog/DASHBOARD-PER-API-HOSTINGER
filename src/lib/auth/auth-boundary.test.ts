@@ -9,6 +9,7 @@ describe("authentication boundary architecture", () => {
       "src/app/page.tsx",
       "src/app/login/page.tsx",
       "src/app/change-password/page.tsx",
+      "src/app/onboarding/page.tsx",
       "src/app/(dashboard)/layout.tsx",
       "src/lib/authorization/site-access.ts",
     ].map(source);
@@ -26,6 +27,7 @@ describe("authentication boundary architecture", () => {
     const pages = [
       "src/app/login/page.tsx",
       "src/app/change-password/page.tsx",
+      "src/app/onboarding/page.tsx",
       "src/app/(dashboard)/layout.tsx",
       "src/app/(dashboard)/overview/page.tsx",
       "src/app/(dashboard)/team/page.tsx",
@@ -39,6 +41,19 @@ describe("authentication boundary architecture", () => {
         'export const dynamic = "force-dynamic"',
       );
     }
+  });
+
+  it("keeps the onboarding page server-only and secret-free", () => {
+    const onboarding = source("src/app/onboarding/page.tsx");
+
+    expect(onboarding).toContain("requireOwnerOnboarding");
+    expect(onboarding).toContain("getApplicationSetupStatus");
+    expect(onboarding).not.toContain('"use client"');
+    expect(onboarding).not.toContain("getHostingerEnv");
+    expect(onboarding).not.toContain("HOSTINGER_API_TOKEN");
+    expect(onboarding).not.toContain("HOSTINGER_ACCOUNT_USERNAME");
+    expect(onboarding).not.toContain("DATABASE_URL");
+    expect(onboarding).not.toContain("AUTH_SECRET");
   });
 
   it("requires authoritative dashboard access at every dashboard page boundary", () => {

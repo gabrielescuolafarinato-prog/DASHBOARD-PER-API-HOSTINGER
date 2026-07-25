@@ -5,6 +5,10 @@ import {
   AUTH_COOKIE_PREFIX,
   AUTH_SESSION_COOKIE_NAME,
 } from "@/lib/auth/cookie-config";
+import {
+  resolveAccessDecision,
+  type DashboardAccessStatus,
+} from "@/lib/auth/access-policy";
 
 const originalEnvironment = {
   DATABASE_URL: process.env.DATABASE_URL,
@@ -82,18 +86,105 @@ describe("real redirect-loop regression", () => {
     expect(expired.visited).not.toEqual(historicalLoop);
     expect(Math.max(valid.redirects.length, expired.redirects.length)).toBe(1);
   });
+
+  it("reproduces the Production OWNER flow without a 404 or loop", () => {
+    const signInRequest = new Request(
+      "https://console.test/api/auth/sign-in/email",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email: "owner@example.test",
+          password: "not-a-real-password",
+        }),
+      },
+    );
+    const signInResponse = successfulSignInResponse(signInRequest);
+    const cookie = signInResponse.headers.get("set-cookie")?.split(";", 1)[0];
+
+    const result = simulateRequest(
+      "/overview",
+      cookie,
+      "owner_onboarding_required",
+    );
+    const overviewResponse = renderRoute(
+      "/overview",
+      "owner_onboarding_required",
+    );
+    const onboardingResponse = renderRoute(
+      "/onboarding",
+      "owner_onboarding_required",
+    );
+
+    expect(signInResponse.status).toBe(200);
+    expect(overviewResponse.status).toBe(307);
+    expect(overviewResponse.headers.get("location")).toBe(
+      "https://console.test/onboarding",
+    );
+    expect(onboardingResponse.status).toBe(200);
+    expect(result.status).toBe(200);
+    expect(result.status).not.toBe(404);
+    expect(result.redirects).toEqual(["/onboarding"]);
+    expect(result.visited).toEqual(["/overview", "/onboarding"]);
+    expect(result.redirects).not.toContain("/login");
+    expect(result.redirects).toHaveLength(1);
+  });
+
+  it("keeps an OWNER with one valid membership on overview", () => {
+    const cookie =
+      `__Secure-${AUTH_COOKIE_PREFIX}.${AUTH_SESSION_COOKIE_NAME}=signed`;
+    const result = simulateRequest("/overview", cookie, "authenticated");
+
+    expect(result.status).toBe(200);
+    expect(result.redirects).toEqual([]);
+    expect(result.visited).toEqual(["/overview"]);
+  });
+
+  it("redirects a valid OWNER away from onboarding exactly once", () => {
+    const cookie =
+      `__Secure-${AUTH_COOKIE_PREFIX}.${AUTH_SESSION_COOKIE_NAME}=signed`;
+    const result = simulateRequest("/onboarding", cookie, "authenticated");
+
+    expect(result.status).toBe(200);
+    expect(result.redirects).toEqual(["/overview"]);
+    expect(result.visited).toEqual(["/onboarding", "/overview"]);
+  });
+
+  it("denies a COLLABORATOR without membership on both protected surfaces", () => {
+    const cookie =
+      `__Secure-${AUTH_COOKIE_PREFIX}.${AUTH_SESSION_COOKIE_NAME}=signed`;
+
+    expect(
+      simulateRequest("/overview", cookie, "missing_membership"),
+    ).toMatchObject({ status: 404, redirects: [] });
+    expect(
+      simulateRequest("/onboarding", cookie, "missing_membership"),
+    ).toMatchObject({ status: 404, redirects: [] });
+  });
+
+  it("sends an anonymous onboarding request to login without a loop", () => {
+    const result = simulateRequest(
+      "/onboarding",
+      undefined,
+      "missing_session",
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.redirects).toEqual(["/login"]);
+    expect(result.visited).toEqual(["/onboarding", "/login"]);
+  });
 });
 
-type AuthoritativeStatus = "authenticated" | "missing_session";
+type AuthoritativeStatus = DashboardAccessStatus;
+type SimulatedPath = "/overview" | "/login" | "/onboarding";
 
 function simulateRequest(
-  initialPath: "/overview",
+  initialPath: SimulatedPath,
   cookie: string | undefined,
   authoritativeStatus: AuthoritativeStatus,
 ) {
   const visited: string[] = [];
   const redirects: string[] = [];
-  let path: "/overview" | "/login" = initialPath;
+  let path: SimulatedPath = initialPath;
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     visited.push(path);
@@ -103,7 +194,7 @@ function simulateRequest(
     const optimisticResponse = proxy(request);
     const optimisticLocation = optimisticResponse.headers.get("location");
     if (optimisticLocation) {
-      path = new URL(optimisticLocation).pathname as "/overview" | "/login";
+      path = new URL(optimisticLocation).pathname as SimulatedPath;
       redirects.push(path);
       continue;
     }
@@ -118,7 +209,7 @@ function simulateRequest(
         visited,
       };
     }
-    path = new URL(authoritativeLocation).pathname as "/overview" | "/login";
+    path = new URL(authoritativeLocation).pathname as SimulatedPath;
     redirects.push(path);
   }
 
@@ -126,14 +217,32 @@ function simulateRequest(
 }
 
 function renderRoute(
-  path: "/overview" | "/login",
+  path: SimulatedPath,
   status: AuthoritativeStatus,
 ) {
-  if (path === "/overview" && status === "missing_session") {
-    return NextResponse.redirect("https://console.test/login");
+  const surface =
+    path === "/login"
+      ? "login"
+      : path === "/onboarding"
+        ? "onboarding"
+        : "dashboard";
+  const decision = resolveAccessDecision(status, surface);
+  if (decision.action === "redirect") {
+    return NextResponse.redirect(
+      `https://console.test${decision.destination}`,
+    );
   }
-  if (path === "/login" && status === "authenticated") {
-    return NextResponse.redirect("https://console.test/overview");
+  if (decision.action === "not_found") {
+    return new NextResponse("not found", { status: 404 });
+  }
+  if (decision.action === "invalid_site") {
+    return new NextResponse("access denied", { status: 403 });
+  }
+  if (decision.action === "ambiguous_site") {
+    return new NextResponse("ambiguous site access", { status: 409 });
+  }
+  if (decision.action === "access_error") {
+    return new NextResponse("site access unavailable", { status: 503 });
   }
   return new NextResponse("ok", { status: 200 });
 }

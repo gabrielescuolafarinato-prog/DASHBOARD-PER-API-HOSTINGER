@@ -40,7 +40,7 @@ vi.mock("@/db", () => ({
   getDb: () => ({
     select: () => ({
       from: () => ({
-        innerJoin: () => ({
+        leftJoin: () => ({
           where: () => ({
             limit: state.membershipLimit,
           }),
@@ -132,7 +132,27 @@ describe("authoritative request session", () => {
     });
   });
 
-  it("turns a missing membership into the existing not-found policy", async () => {
+  it("routes an OWNER with zero memberships to onboarding", async () => {
+    state.memberships = [];
+    const {
+      getCurrentDashboardAccess,
+      requireDashboardSession,
+      requireOwnerOnboarding,
+    } = await import("./session");
+
+    expect((await getCurrentDashboardAccess()).status).toBe(
+      "owner_onboarding_required",
+    );
+    await expect(requireDashboardSession()).rejects.toThrow(
+      "REDIRECT:/onboarding",
+    );
+    await expect(requireOwnerOnboarding()).resolves.toMatchObject({
+      user: { role: "OWNER" },
+    });
+  });
+
+  it("keeps a COLLABORATOR without membership on the not-found policy", async () => {
+    state.authSession = validAuthSession({ role: "COLLABORATOR" });
     state.memberships = [];
     const { getCurrentDashboardAccess, requireDashboardSession } =
       await import("./session");
@@ -141,6 +161,77 @@ describe("authoritative request session", () => {
       "missing_membership",
     );
     await expect(requireDashboardSession()).rejects.toThrow("NOT_FOUND");
+  });
+
+  it("does not authorize a membership whose site no longer exists", async () => {
+    state.memberships = [
+      {
+        ...validMembership(),
+        siteId: null,
+        name: null,
+        primaryDomain: null,
+        hostingerUsername: null,
+        siteStatus: null,
+      },
+    ];
+    const { getCurrentDashboardAccess, requireDashboardSession } =
+      await import("./session");
+
+    expect((await getCurrentDashboardAccess()).status).toBe(
+      "invalid_site_membership",
+    );
+    await expect(requireDashboardSession()).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      status: 403,
+    });
+  });
+
+  it.each(["ERROR", "UNCONFIGURED"] as const)(
+    "does not authorize a site in %s state",
+    async (siteStatus) => {
+      state.memberships = [{ ...validMembership(), siteStatus }];
+      const { getCurrentDashboardAccess } = await import("./session");
+
+      expect((await getCurrentDashboardAccess()).status).toBe(
+        "invalid_site_membership",
+      );
+    },
+  );
+
+  it("does not select a site when multiple memberships exist", async () => {
+    state.memberships = [
+      validMembership(),
+      {
+        ...validMembership(),
+        membershipSiteId: "44444444-4444-4444-8444-444444444444",
+        siteId: "44444444-4444-4444-8444-444444444444",
+        primaryDomain: "other.example.test",
+      },
+    ];
+    const { getCurrentDashboardAccess, requireDashboardSession } =
+      await import("./session");
+
+    expect((await getCurrentDashboardAccess()).status).toBe(
+      "ambiguous_site_memberships",
+    );
+    await expect(requireDashboardSession()).rejects.toMatchObject({
+      code: "CONFLICT",
+      status: 409,
+    });
+  });
+
+  it("keeps database errors distinct from missing membership and onboarding", async () => {
+    state.membershipLimit.mockRejectedValue(
+      new Error("database unavailable"),
+    );
+    const { getCurrentDashboardAccess, requireDashboardSession } =
+      await import("./session");
+
+    expect((await getCurrentDashboardAccess()).status).toBe("access_error");
+    await expect(requireDashboardSession()).rejects.toMatchObject({
+      code: "INTERNAL_ERROR",
+      status: 503,
+    });
   });
 });
 
@@ -182,10 +273,12 @@ function validAuthSession(
 
 function validMembership() {
   return {
+    membershipSiteId: "33333333-3333-4333-8333-333333333333",
     siteId: "33333333-3333-4333-8333-333333333333",
     name: "Production",
     primaryDomain: "example.test",
     hostingerUsername: "u123",
+    siteStatus: "VERIFIED",
     membershipRole: "ADMIN",
   };
 }

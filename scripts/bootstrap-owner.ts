@@ -5,10 +5,8 @@ config({ quiet: true });
 import { hashPassword } from "better-auth/crypto";
 import { eq } from "drizzle-orm";
 import { getDb } from "../src/db/connection";
-import { account, siteMemberships, sites, user } from "../src/db/schema";
+import { account, user } from "../src/db/schema";
 import { assertStrongPassword } from "../src/lib/auth/password-policy";
-import { getHostingerEnv } from "../src/lib/env";
-import { normalizeDomain } from "../src/lib/hostinger/domain";
 
 function readArg(name: string) {
   const prefix = `--${name}=`;
@@ -55,33 +53,13 @@ async function main() {
       userId,
       password: await hashPassword(password),
     });
-
-    const hostinger = getHostingerEnv();
-    if (hostinger.HOSTINGER_SITE_DOMAIN && hostinger.HOSTINGER_ACCOUNT_USERNAME) {
-      const domain = normalizeDomain(hostinger.HOSTINGER_SITE_DOMAIN);
-      const [site] = await db
-        .insert(sites)
-        .values({
-          name: domain,
-          primaryDomain: domain,
-          hostingerUsername: hostinger.HOSTINGER_ACCOUNT_USERNAME,
-          status: "UNCONFIGURED",
-        })
-        .onConflictDoUpdate({
-          target: sites.primaryDomain,
-          set: { hostingerUsername: hostinger.HOSTINGER_ACCOUNT_USERNAME },
-        })
-        .returning();
-      await db
-        .insert(siteMemberships)
-        .values({ siteId: site.id, userId, role: "ADMIN" })
-        .onConflictDoNothing();
-    }
   } catch (error) {
     await db.delete(user).where(eq(user.id, userId));
     throw error;
   }
-  console.info(`OWNER created for ${email}. Password was not logged.`);
+  console.info(
+    `OWNER created for ${email}. Password was not logged. Site onboarding is still required.`,
+  );
 }
 
 main().catch((error: unknown) => {

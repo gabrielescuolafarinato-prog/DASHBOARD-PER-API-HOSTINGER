@@ -9,6 +9,10 @@ import { siteMemberships, sites } from "@/db/schema";
 import { AppError } from "@/lib/errors";
 import { getApplicationSetupStatus } from "@/lib/env";
 import type { SiteAccessRecord } from "@/lib/authorization/policy";
+import {
+  resolveAccessDecision,
+  type AccessSurface,
+} from "./access-policy";
 import { isAccountActive, requiresPasswordChange } from "./session-policy";
 
 type SessionUser = Omit<
@@ -49,9 +53,35 @@ export type CurrentDashboardAccessState =
       current: AuthenticatedSession;
     }
   | {
+      status: "owner_onboarding_required";
+      current: AuthenticatedSession;
+    }
+  | {
+      status: "invalid_site_membership";
+      current: AuthenticatedSession;
+    }
+  | {
+      status: "ambiguous_site_memberships";
+      current: AuthenticatedSession;
+    }
+  | {
+      status: "access_error";
+      current: AuthenticatedSession;
+    }
+  | {
       status: "authenticated";
       current: AuthenticatedSession & { site: SiteAccessRecord };
     };
+
+export type SiteMembershipCandidate = {
+  membershipSiteId: string;
+  siteId: string | null;
+  name: string | null;
+  primaryDomain: string | null;
+  hostingerUsername: string | null;
+  siteStatus: "UNCONFIGURED" | "VERIFIED" | "ERROR" | null;
+  membershipRole: "ADMIN" | "MEMBER";
+};
 
 /**
  * The single authoritative session lookup for the current request.
@@ -121,32 +151,101 @@ export const getCurrentDashboardAccess = cache(
     const state = await getCurrentSession();
     if (state.status !== "authenticated") return state;
 
-    const memberships = await getDb()
-      .select({
-        siteId: sites.id,
-        name: sites.name,
-        primaryDomain: sites.primaryDomain,
-        hostingerUsername: sites.hostingerUsername,
-        membershipRole: siteMemberships.role,
-      })
-      .from(siteMemberships)
-      .innerJoin(sites, eq(siteMemberships.siteId, sites.id))
-      .where(eq(siteMemberships.userId, state.current.user.id))
-      .limit(2);
-
-    if (memberships.length !== 1) {
-      return {
-        status: "missing_membership",
-        current: state.current,
-      };
+    let memberships: SiteMembershipCandidate[];
+    try {
+      memberships = await getDb()
+        .select({
+          membershipSiteId: siteMemberships.siteId,
+          siteId: sites.id,
+          name: sites.name,
+          primaryDomain: sites.primaryDomain,
+          hostingerUsername: sites.hostingerUsername,
+          siteStatus: sites.status,
+          membershipRole: siteMemberships.role,
+        })
+        .from(siteMemberships)
+        .leftJoin(sites, eq(siteMemberships.siteId, sites.id))
+        .where(eq(siteMemberships.userId, state.current.user.id))
+        .limit(2);
+    } catch {
+      return { status: "access_error", current: state.current };
     }
 
-    return {
-      status: "authenticated",
-      current: { ...state.current, site: memberships[0] },
-    };
+    return resolveUserSiteAccess(state.current, memberships);
   },
 );
+
+export function resolveUserSiteAccess(
+  current: AuthenticatedSession,
+  memberships: SiteMembershipCandidate[],
+): CurrentDashboardAccessState {
+  if (memberships.length === 0) {
+    return {
+      status:
+        current.user.role === "OWNER"
+          ? "owner_onboarding_required"
+          : "missing_membership",
+      current,
+    };
+  }
+  if (memberships.length > 1) {
+    return { status: "ambiguous_site_memberships", current };
+  }
+
+  const [membership] = memberships;
+  if (
+    membership.membershipSiteId !== membership.siteId ||
+    membership.siteStatus !== "VERIFIED" ||
+    !membership.name ||
+    !membership.primaryDomain ||
+    !membership.hostingerUsername
+  ) {
+    return { status: "invalid_site_membership", current };
+  }
+
+  return {
+    status: "authenticated",
+    current: {
+      ...current,
+      site: {
+        siteId: membership.siteId,
+        name: membership.name,
+        primaryDomain: membership.primaryDomain,
+        hostingerUsername: membership.hostingerUsername,
+        membershipRole: membership.membershipRole,
+      },
+    },
+  };
+}
+
+export async function authorizeCurrentSurface(surface: AccessSurface) {
+  const state = await getCurrentDashboardAccess();
+  const decision = resolveAccessDecision(state.status, surface);
+  if (decision.action === "redirect") redirect(decision.destination);
+  if (decision.action === "not_found") notFound();
+  if (decision.action === "invalid_site") {
+    throw new AppError(
+      "FORBIDDEN",
+      "The associated site is not available.",
+      403,
+    );
+  }
+  if (decision.action === "ambiguous_site") {
+    throw new AppError(
+      "CONFLICT",
+      "Multiple site memberships violate the single-site boundary.",
+      409,
+    );
+  }
+  if (decision.action === "access_error") {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Site access could not be verified.",
+      503,
+    );
+  }
+  return state;
+}
 
 export async function requireSession(options?: {
   allowPasswordChange?: boolean;
@@ -167,18 +266,26 @@ export async function requireSession(options?: {
 }
 
 export async function requireDashboardSession() {
-  const state = await getCurrentDashboardAccess();
-  if (state.status === "setup_required") redirect("/setup-required");
-  if (
-    state.status === "missing_session" ||
-    state.status === "inactive_user"
-  ) {
-    redirect("/login");
+  const state = await authorizeCurrentSurface("dashboard");
+  if (state.status !== "authenticated") {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Dashboard authorization did not resolve.",
+      500,
+    );
   }
-  if (state.status === "password_change_required") {
-    redirect("/change-password");
+  return state.current;
+}
+
+export async function requireOwnerOnboarding() {
+  const state = await authorizeCurrentSurface("onboarding");
+  if (state.status !== "owner_onboarding_required") {
+    throw new AppError(
+      "INTERNAL_ERROR",
+      "Owner onboarding authorization did not resolve.",
+      500,
+    );
   }
-  if (state.status === "missing_membership") notFound();
   return state.current;
 }
 

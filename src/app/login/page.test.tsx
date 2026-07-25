@@ -2,21 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  state: { status: "missing_session" } as { status: string },
-  getCurrentDashboardAccess: vi.fn(),
+  authorizeCurrentSurface: vi.fn(),
 }));
 
 vi.mock("@/lib/auth/session", () => ({
-  getCurrentDashboardAccess: mocks.getCurrentDashboardAccess,
-}));
-
-vi.mock("next/navigation", () => ({
-  redirect: vi.fn((destination: string) => {
-    throw new Error(`REDIRECT:${destination}`);
-  }),
-  notFound: vi.fn(() => {
-    throw new Error("NOT_FOUND");
-  }),
+  authorizeCurrentSurface: mocks.authorizeCurrentSurface,
 }));
 
 vi.mock("./login-form", () => ({
@@ -27,8 +17,10 @@ import LoginPage from "./page";
 
 describe("login page session routing", () => {
   beforeEach(() => {
-    mocks.state = { status: "missing_session" };
-    mocks.getCurrentDashboardAccess.mockImplementation(async () => mocks.state);
+    mocks.authorizeCurrentSurface.mockReset();
+    mocks.authorizeCurrentSurface.mockResolvedValue({
+      status: "missing_session",
+    });
   });
 
   it("renders normally for an anonymous request", async () => {
@@ -36,41 +28,50 @@ describe("login page session routing", () => {
 
     expect(markup).toContain("Welcome back");
     expect(markup).toContain('aria-label="login form"');
-    expect(mocks.getCurrentDashboardAccess).toHaveBeenCalledOnce();
+    expect(mocks.authorizeCurrentSurface).toHaveBeenCalledOnce();
+    expect(mocks.authorizeCurrentSurface).toHaveBeenCalledWith("login");
   });
 
   it("renders normally when a cookie exists but its session does not", async () => {
-    mocks.state = { status: "missing_session" };
-
     expect(renderToStaticMarkup(await LoginPage())).toContain("Welcome back");
   });
 
   it("renders a safe login for a disabled account", async () => {
-    mocks.state = { status: "inactive_user" };
+    mocks.authorizeCurrentSurface.mockResolvedValue({
+      status: "inactive_user",
+    });
 
     expect(renderToStaticMarkup(await LoginPage())).toContain("Welcome back");
   });
 
   it("redirects a fully authorized session once to overview", async () => {
-    mocks.state = { status: "authenticated" };
+    mocks.authorizeCurrentSurface.mockRejectedValue(
+      new Error("REDIRECT:/overview"),
+    );
 
     await expect(LoginPage()).rejects.toThrow("REDIRECT:/overview");
   });
 
   it("routes mandatory password change directly to its checkpoint", async () => {
-    mocks.state = { status: "password_change_required" };
+    mocks.authorizeCurrentSurface.mockRejectedValue(
+      new Error("REDIRECT:/change-password"),
+    );
 
     await expect(LoginPage()).rejects.toThrow("REDIRECT:/change-password");
   });
 
-  it("uses the existing not-found policy for a missing membership", async () => {
-    mocks.state = { status: "missing_membership" };
+  it("routes an OWNER without membership to onboarding", async () => {
+    mocks.authorizeCurrentSurface.mockRejectedValue(
+      new Error("REDIRECT:/onboarding"),
+    );
 
-    await expect(LoginPage()).rejects.toThrow("NOT_FOUND");
+    await expect(LoginPage()).rejects.toThrow("REDIRECT:/onboarding");
   });
 
   it("preserves setup-required behavior", async () => {
-    mocks.state = { status: "setup_required" };
+    mocks.authorizeCurrentSurface.mockRejectedValue(
+      new Error("REDIRECT:/setup-required"),
+    );
 
     await expect(LoginPage()).rejects.toThrow("REDIRECT:/setup-required");
   });

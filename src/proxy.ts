@@ -10,6 +10,7 @@ export const protectedPrefixes = [
   "/capabilities",
   "/audit-log",
   "/change-password",
+  "/onboarding",
 ] as const;
 
 export function isProtectedPath(pathname: string) {
@@ -43,5 +44,6 @@ export const config = {
     "/capabilities/:path*",
     "/audit-log/:path*",
     "/change-password",
+    "/onboarding",
   ],
 };

@@ -1,33 +1,41 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { LoaderCircle, LockKeyhole } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
 import { inputClass, primaryButtonClass } from "@/components/ui";
+import { createSubmissionGate, executeLogin } from "./login-flow";
 
 export function LoginForm() {
   const router = useRouter();
+  const submissionGate = useRef(createSubmissionGate());
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!submissionGate.current.begin()) return;
     setPending(true);
     setError(undefined);
     const form = new FormData(event.currentTarget);
-    const result = await authClient.signIn.email({
-      email: String(form.get("email")),
-      password: String(form.get("password")),
-      rememberMe: true,
-    });
-    setPending(false);
-    if (result.error) {
+    const outcome = await executeLogin(
+      {
+        email: String(form.get("email")),
+        password: String(form.get("password")),
+      },
+      {
+        signIn: (input) => authClient.signIn.email(input),
+        navigate: (destination) => router.replace(destination),
+      },
+    );
+    if (outcome === "auth_error") {
       setError("Email or password is incorrect, or the account is disabled.");
-      return;
+    } else if (outcome === "unexpected_error") {
+      setError("Sign-in could not be completed. Please try again.");
     }
-    router.replace("/overview");
-    router.refresh();
+    submissionGate.current.end();
+    setPending(false);
   }
 
   return (

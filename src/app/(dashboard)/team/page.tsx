@@ -2,7 +2,7 @@ import { desc } from "drizzle-orm";
 import { UserRoundCog } from "lucide-react";
 import { getDb } from "@/db";
 import { user } from "@/db/schema";
-import { requireSession } from "@/lib/auth/session";
+import { requireDashboardSession } from "@/lib/auth/session";
 import { setUserActiveFormAction } from "@/app/actions";
 import {
   Badge,
@@ -14,9 +14,10 @@ import { formatDate } from "@/lib/utils";
 import { CreateCollaboratorForm } from "./create-collaborator-form";
 
 export const metadata = { title: "Team" };
+export const dynamic = "force-dynamic";
 
 export default async function TeamPage() {
-  const current = await requireSession();
+  const current = await requireDashboardSession();
   const users = await getDb()
     .select({
       id: user.id,

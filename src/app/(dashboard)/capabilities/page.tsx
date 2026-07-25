@@ -3,8 +3,10 @@ import {
   listCapabilities,
   type CapabilityState,
 } from "@/lib/hostinger/capabilities";
+import { requireDashboardSession } from "@/lib/auth/session";
 
 export const metadata = { title: "Capabilities" };
+export const dynamic = "force-dynamic";
 
 const groups: { state: CapabilityState; title: string; description: string }[] = [
   { state: "IMPLEMENTED", title: "Implemented", description: "Available in this foundation release." },
@@ -13,7 +15,8 @@ const groups: { state: CapabilityState; title: string; description: string }[] =
   { state: "DENIED", title: "Denied by boundary", description: "Global or insufficiently confinable operations remain blocked." },
 ];
 
-export default function CapabilitiesPage() {
+export default async function CapabilitiesPage() {
+  await requireDashboardSession();
   const capabilities = listCapabilities();
   return (
     <>

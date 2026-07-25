@@ -1,4 +1,4 @@
-import { count, desc, eq } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 import {
   Activity,
   CheckCircle2,
@@ -9,17 +9,18 @@ import {
   Users,
 } from "lucide-react";
 import { getDb } from "@/db";
-import { siteMemberships, sites, user } from "@/db/schema";
-import { requireSession } from "@/lib/auth/session";
+import { sites, user } from "@/db/schema";
+import { requireDashboardSession } from "@/lib/auth/session";
 import { getHostingerEnv } from "@/lib/env";
 import { listCapabilities } from "@/lib/hostinger/capabilities";
 import { Badge, Card, PageHeading } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
 
 export const metadata = { title: "Overview" };
+export const dynamic = "force-dynamic";
 
 export default async function OverviewPage() {
-  const current = await requireSession();
+  const current = await requireDashboardSession();
   const db = getDb();
   const [site] = await db
     .select({
@@ -29,10 +30,8 @@ export default async function OverviewPage() {
       status: sites.status,
       lastSyncedAt: sites.lastSyncedAt,
     })
-    .from(siteMemberships)
-    .innerJoin(sites, eq(siteMemberships.siteId, sites.id))
-    .where(eq(siteMemberships.userId, current.user.id))
-    .orderBy(desc(sites.createdAt))
+    .from(sites)
+    .where(eq(sites.id, current.site.siteId))
     .limit(1);
   const [{ activeUsers }] = await db
     .select({ activeUsers: count() })

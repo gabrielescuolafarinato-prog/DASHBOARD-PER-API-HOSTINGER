@@ -1,13 +1,20 @@
-import { redirect } from "next/navigation";
-import { getValidatedSession } from "@/lib/auth/session";
-import { getApplicationSetupStatus } from "@/lib/env";
+import { notFound, redirect } from "next/navigation";
+import { getCurrentDashboardAccess } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  if (!getApplicationSetupStatus().applicationConfigured) {
-    redirect("/setup-required");
+  const state = await getCurrentDashboardAccess();
+  if (state.status === "setup_required") redirect("/setup-required");
+  if (
+    state.status === "missing_session" ||
+    state.status === "inactive_user"
+  ) {
+    redirect("/login");
   }
-  const session = await getValidatedSession();
-  redirect(session ? "/overview" : "/login");
+  if (state.status === "password_change_required") {
+    redirect("/change-password");
+  }
+  if (state.status === "missing_membership") notFound();
+  redirect("/overview");
 }

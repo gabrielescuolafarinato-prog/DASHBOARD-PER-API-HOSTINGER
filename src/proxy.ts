@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSessionCookie } from "better-auth/cookies";
 import { getApplicationSetupStatus } from "@/lib/env";
+import { AUTH_SESSION_COOKIE_LOOKUP } from "@/lib/auth/cookie-config";
 
 export const protectedPrefixes = [
   "/overview",
@@ -24,7 +25,10 @@ export function proxy(request: NextRequest) {
   ) {
     return NextResponse.redirect(new URL("/setup-required", request.url));
   }
-  if (isProtectedPath(request.nextUrl.pathname) && !getSessionCookie(request)) {
+  if (
+    isProtectedPath(request.nextUrl.pathname) &&
+    !getSessionCookie(request, AUTH_SESSION_COOKIE_LOOKUP)
+  ) {
     const loginUrl = new URL("/login", request.url);
     return NextResponse.redirect(loginUrl);
   }

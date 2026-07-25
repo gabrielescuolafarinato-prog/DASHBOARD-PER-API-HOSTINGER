@@ -13,6 +13,10 @@ import {
   collaboratorAuthRole,
   ownerAuthRole,
 } from "@/lib/auth/permissions";
+import {
+  AUTH_COOKIE_PREFIX,
+  AUTH_DEFAULT_COOKIE_ATTRIBUTES,
+} from "@/lib/auth/cookie-config";
 
 function createAuth() {
   const env = getAuthEnv();
@@ -31,8 +35,9 @@ function createAuth() {
     }),
     advanced: {
       database: { generateId: "uuid" },
-      cookiePrefix: "hostinger-console",
+      cookiePrefix: AUTH_COOKIE_PREFIX,
       useSecureCookies: env.IS_PRODUCTION,
+      defaultCookieAttributes: AUTH_DEFAULT_COOKIE_ATTRIBUTES,
     },
     emailAndPassword: {
       enabled: true,

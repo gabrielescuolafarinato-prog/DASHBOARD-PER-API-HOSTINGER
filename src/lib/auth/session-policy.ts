@@ -1,11 +1,11 @@
 export function isAccountActive(
-  record: { isActive: boolean } | null | undefined,
+  record: { isActive?: boolean | null } | null | undefined,
 ) {
   return record?.isActive === true;
 }
 
 export function requiresPasswordChange(record: {
-  mustChangePassword: boolean;
+  mustChangePassword?: boolean | null;
 }) {
-  return record.mustChangePassword;
+  return record.mustChangePassword === true;
 }

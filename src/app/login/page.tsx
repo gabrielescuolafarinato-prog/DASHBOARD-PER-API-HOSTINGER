@@ -1,17 +1,20 @@
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { ShieldCheck } from "lucide-react";
-import { getValidatedSession } from "@/lib/auth/session";
-import { getApplicationSetupStatus } from "@/lib/env";
+import { getCurrentDashboardAccess } from "@/lib/auth/session";
 import { LoginForm } from "./login-form";
 
 export const metadata = { title: "Sign in" };
 export const dynamic = "force-dynamic";
 
 export default async function LoginPage() {
-  if (!getApplicationSetupStatus().applicationConfigured) {
-    redirect("/setup-required");
+  const state = await getCurrentDashboardAccess();
+  if (state.status === "setup_required") redirect("/setup-required");
+  if (state.status === "password_change_required") {
+    redirect("/change-password");
   }
-  if (await getValidatedSession()) redirect("/overview");
+  if (state.status === "missing_membership") notFound();
+  if (state.status === "authenticated") redirect("/overview");
+
   return (
     <main className="grid min-h-screen lg:grid-cols-[1.05fr_.95fr]">
       <section className="hidden bg-[#0b2239] p-12 text-white lg:flex lg:flex-col lg:justify-between">

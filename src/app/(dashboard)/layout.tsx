@@ -1,16 +1,11 @@
 import { Sidebar } from "@/components/sidebar";
 import { DashboardHeader } from "@/components/dashboard-header";
-import { requireSession } from "@/lib/auth/session";
-import { getApplicationSetupStatus } from "@/lib/env";
-import { redirect } from "next/navigation";
+import { requireDashboardSession } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
-  if (!getApplicationSetupStatus().applicationConfigured) {
-    redirect("/setup-required");
-  }
-  const current = await requireSession();
+  const current = await requireDashboardSession();
   return (
     <div className="min-h-screen">
       <Sidebar />

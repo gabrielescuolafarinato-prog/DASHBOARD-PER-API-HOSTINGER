@@ -3,10 +3,13 @@ import { getDb } from "@/db";
 import { auditEvents, user } from "@/db/schema";
 import { Badge, Card, PageHeading } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
+import { requireDashboardSession } from "@/lib/auth/session";
 
 export const metadata = { title: "Audit log" };
+export const dynamic = "force-dynamic";
 
 export default async function AuditLogPage() {
+  await requireDashboardSession();
   const events = await getDb()
     .select({
       id: auditEvents.id,

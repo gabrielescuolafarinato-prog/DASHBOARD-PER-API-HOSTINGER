@@ -1,17 +1,18 @@
-import { desc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { KeyRound, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { getDb } from "@/db";
-import { siteMemberships, sites } from "@/db/schema";
-import { requireSession } from "@/lib/auth/session";
+import { sites } from "@/db/schema";
+import { requireDashboardSession } from "@/lib/auth/session";
 import { getHostingerEnv } from "@/lib/env";
 import { syncHostingerSiteFormAction } from "@/app/actions";
 import { Badge, Card, PageHeading, primaryButtonClass } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
 
 export const metadata = { title: "Site settings" };
+export const dynamic = "force-dynamic";
 
 export default async function SiteSettingsPage() {
-  const current = await requireSession();
+  const current = await requireDashboardSession();
   const [site] = await getDb()
     .select({
       name: sites.name,
@@ -22,10 +23,8 @@ export default async function SiteSettingsPage() {
       status: sites.status,
       lastSyncedAt: sites.lastSyncedAt,
     })
-    .from(siteMemberships)
-    .innerJoin(sites, eq(siteMemberships.siteId, sites.id))
-    .where(eq(siteMemberships.userId, current.user.id))
-    .orderBy(desc(sites.createdAt))
+    .from(sites)
+    .where(eq(sites.id, current.site.siteId))
     .limit(1);
   const env = getHostingerEnv();
   const configured = Boolean(env.HOSTINGER_API_TOKEN);

@@ -1,4 +1,5 @@
 import "server-only";
+import { z } from "zod";
 import { AppError } from "@/lib/errors";
 import { getHostingerEnv } from "@/lib/env";
 import { normalizeDomain } from "./domain";
@@ -22,6 +23,42 @@ export type NodeSiteProbe = {
   correlationId?: string;
 };
 
+export const nodeBuildStates = [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+] as const;
+
+export type NodeBuildState = (typeof nodeBuildStates)[number];
+
+export type NodeBuildSummary = {
+  uuid: string;
+  state: NodeBuildState;
+  origin?: "archive";
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type NodeBuildPage = {
+  builds: NodeBuildSummary[];
+  pagination: {
+    page: number;
+    perPage: number;
+    total: number;
+    totalPages: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
+  correlationId?: string;
+};
+
+export type NodeBuildLogs = {
+  logs: string;
+  lines: number;
+  correlationId?: string;
+};
+
 type ClientOptions = {
   token: string;
   fetchImpl?: typeof fetch;
@@ -33,6 +70,46 @@ type HostingerResponse = {
   payload: unknown;
   correlationId?: string;
 };
+
+const hostingerBuildSchema = z.object({
+  uuid: z.string().uuid(),
+  state: z.enum(nodeBuildStates),
+  options: z
+    .object({
+      source_type: z.literal("archive").nullable().optional(),
+    })
+    .passthrough()
+    .nullable()
+    .optional(),
+  created_at: z.iso.datetime({ offset: true }).optional(),
+  updated_at: z.iso.datetime({ offset: true }).optional(),
+});
+
+const hostingerBuildPageSchema = z.object({
+  data: z.array(hostingerBuildSchema).superRefine((items, context) => {
+    const seen = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (seen.has(item.uuid)) {
+        context.addIssue({
+          code: "custom",
+          message: "Duplicate build UUID.",
+          path: [index, "uuid"],
+        });
+      }
+      seen.add(item.uuid);
+    }
+  }),
+  meta: z.object({
+    current_page: z.number().int().min(1),
+    per_page: z.number().int().min(1).max(100),
+    total: z.number().int().nonnegative(),
+  }),
+});
+
+const hostingerBuildLogsSchema = z.object({
+  logs: z.string().max(1_000_000).nullable(),
+  lines: z.number().int().nonnegative().max(10_000_000),
+});
 
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
 
@@ -289,6 +366,90 @@ export class HostingerClient {
     return {
       nodeEnabled: true,
       buildCount: records.length,
+      correlationId: response.correlationId,
+    };
+  }
+
+  async listNodeBuilds(
+    configuredUsername: string,
+    configuredDomain: string,
+    pagination: { page: number; perPage: number },
+  ): Promise<NodeBuildPage> {
+    const domain = normalizeDomain(configuredDomain);
+    const parameters = new URLSearchParams({
+      page: String(pagination.page),
+      per_page: String(pagination.perPage),
+    });
+    const response = await this.request(
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(
+        domain,
+      )}/nodejs/builds?${parameters.toString()}`,
+    );
+    const parsed = hostingerBuildPageSchema.safeParse(response.payload);
+    if (
+      !parsed.success ||
+      parsed.data.meta.current_page !== pagination.page ||
+      parsed.data.meta.per_page !== pagination.perPage
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+
+    const { current_page: page, per_page: perPage, total } = parsed.data.meta;
+    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+    return {
+      builds: parsed.data.data.map((build) => ({
+        uuid: build.uuid,
+        state: build.state,
+        origin: build.options?.source_type ?? undefined,
+        createdAt: build.created_at,
+        updatedAt: build.updated_at,
+      })),
+      pagination: {
+        page,
+        perPage,
+        total,
+        totalPages,
+        hasPrevious: page > 1,
+        hasNext: page < totalPages,
+      },
+      correlationId: response.correlationId,
+    };
+  }
+
+  async getNodeBuildLogs(
+    configuredUsername: string,
+    configuredDomain: string,
+    buildUuid: string,
+    fromLine: number,
+  ): Promise<NodeBuildLogs> {
+    const domain = normalizeDomain(configuredDomain);
+    const uuid = z.string().uuid().safeParse(buildUuid);
+    if (!uuid.success) {
+      throw new AppError(
+        "VALIDATION_ERROR",
+        "The build identifier is invalid.",
+        400,
+      );
+    }
+    const parameters = new URLSearchParams({
+      from_line: String(fromLine),
+    });
+    const response = await this.request(
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(
+        domain,
+      )}/nodejs/builds/${encodeURIComponent(
+        uuid.data,
+      )}/logs?${parameters.toString()}`,
+    );
+    const parsed = hostingerBuildLogsSchema.safeParse(response.payload);
+    if (!parsed.success) throw malformedResponse(response.correlationId);
+    return {
+      logs: parsed.data.logs ?? "",
+      lines: parsed.data.lines,
       correlationId: response.correlationId,
     };
   }

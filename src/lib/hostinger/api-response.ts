@@ -1,0 +1,58 @@
+import { NextResponse } from "next/server";
+import { ZodError } from "zod";
+import { AppError } from "@/lib/errors";
+
+const noStoreHeaders = {
+  "Cache-Control": "private, no-store, max-age=0",
+};
+
+export function apiSuccess<T>(data: T) {
+  return NextResponse.json(
+    { ok: true as const, data },
+    { headers: noStoreHeaders },
+  );
+}
+
+export function apiFailure(error: unknown) {
+  if (error instanceof ZodError) {
+    return NextResponse.json(
+      {
+        ok: false as const,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "The request parameters are invalid.",
+        },
+      },
+      { status: 400, headers: noStoreHeaders },
+    );
+  }
+  if (error instanceof AppError) {
+    const headers: Record<string, string> = { ...noStoreHeaders };
+    if (error.code === "RATE_LIMITED") headers["Retry-After"] = "30";
+    return NextResponse.json(
+      {
+        ok: false as const,
+        error: {
+          code: error.code,
+          message:
+            error.code === "RATE_LIMITED"
+              ? "Hostinger is temporarily rate limited. Retry in a few moments."
+              : error.message,
+          retryAfterSeconds:
+            error.code === "RATE_LIMITED" ? 30 : undefined,
+        },
+      },
+      { status: error.status, headers },
+    );
+  }
+  return NextResponse.json(
+    {
+      ok: false as const,
+      error: {
+        code: "INTERNAL_ERROR",
+        message: "The operation could not be completed.",
+      },
+    },
+    { status: 500, headers: noStoreHeaders },
+  );
+}

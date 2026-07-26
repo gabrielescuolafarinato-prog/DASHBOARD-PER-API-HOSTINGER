@@ -5,6 +5,7 @@ import { AUTH_SESSION_COOKIE_LOOKUP } from "@/lib/auth/cookie-config";
 
 export const protectedPrefixes = [
   "/overview",
+  "/builds",
   "/team",
   "/site-settings",
   "/capabilities",
@@ -39,6 +40,7 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     "/overview/:path*",
+    "/builds/:path*",
     "/team/:path*",
     "/site-settings/:path*",
     "/capabilities/:path*",

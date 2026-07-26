@@ -31,6 +31,12 @@ export const auditResultEnum = pgEnum("audit_result", [
   "FAILURE",
   "DENIED",
 ]);
+export const buildStateEnum = pgEnum("build_state", [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
 
 export const user = pgTable(
   "users",
@@ -181,6 +187,37 @@ export const hostingerResourceBindings = pgTable(
   ],
 );
 
+export const siteBuilds = pgTable(
+  "site_builds",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    siteId: uuid("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "cascade" }),
+    buildUuid: uuid("build_uuid").notNull(),
+    state: buildStateEnum("state").notNull(),
+    origin: text("origin"),
+    hostingerCreatedAt: timestamp("hostinger_created_at", {
+      withTimezone: true,
+    }),
+    hostingerUpdatedAt: timestamp("hostinger_updated_at", {
+      withTimezone: true,
+    }),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("site_builds_build_uuid_unique").on(table.buildUuid),
+    index("site_builds_site_state_idx").on(table.siteId, table.state),
+    index("site_builds_site_updated_idx").on(
+      table.siteId,
+      table.hostingerUpdatedAt,
+    ),
+  ],
+);
+
 export const auditEvents = pgTable(
   "audit_events",
   {
@@ -212,6 +249,7 @@ export const schema = {
   sites,
   siteMemberships,
   hostingerResourceBindings,
+  siteBuilds,
   auditEvents,
 };
 

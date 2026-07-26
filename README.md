@@ -1,6 +1,6 @@
 # Hostinger Single-Site Console
 
-Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato e policy capability default-deny. Le capability operative Hostinger successive all’importazione non sono ancora esposte.
+Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, elenco build e log build read-only con policy capability default-deny.
 
 ## Stack e requisiti
 
@@ -176,6 +176,8 @@ Le migration correnti sono:
 
 1. `0000_good_lady_bullseye.sql`: schema iniziale, vincoli, foreign key e indici.
 2. `0001_public_sway.sql`: indici univoci case-insensitive per email e dominio.
+3. `0002_last_oracle.sql`: enum stato build e binding `site_builds` con UUID
+   Hostinger globale univoco, foreign key al sito e indici di lettura.
 
 Drizzle registra le migration applicate in
 `drizzle.__drizzle_migrations`: rieseguire `npm run db:migrate` è idempotente e
@@ -314,9 +316,36 @@ raggiungono mai il client, il database o l’audit.
 - Sito, username, dominio ed external ID vengono risolti dal server.
 - Capability non registrate vengono negate.
 - Non esiste un proxy Hostinger generico.
-- L’Overview mostra soltanto identità del sito, dominio, stato `VERIFIED`,
-  Node.js attivo, connessione Hostinger e data dell’ultima verifica. Build, log,
-  DNS e database Hostinger restano non implementati.
+- L’Overview mostra identità del sito, stato dell’infrastruttura e contatori
+  derivati dal registro capability. Build e log sono implementati in sola
+  lettura; DNS, database e operazioni di scrittura restano non implementati.
+
+## Build Node.js e log read-only
+
+La pagina `/builds` usa soltanto gli endpoint applicativi specifici
+`GET /api/builds` e `GET /api/builds/{uuid}/logs`. Ogni richiesta ricalcola
+sessione, stato utente e singola membership; username e dominio sono letti dal
+record autorevole `sites` e non sono parametri accettati dal browser.
+
+L’elenco Hostinger è validato con Zod, normalizzato in un payload minimo e
+sincronizzato tramite upsert in `site_builds`. `build_uuid` è univoco
+globalmente: un conflitto già associato a un altro sito non viene riassegnato.
+La lettura log richiede prima un lookup composto `site_id + build_uuid`, quindi
+un UUID valido ma estraneo restituisce not-found senza chiamare Hostinger.
+
+La paginazione accetta `page` tra 1 e 10.000 e `per_page` tra 1 e 100; la UI usa
+25 elementi. I log accettano soltanto `from_line` tra 0 e 10.000.000. Le build
+`pending` o `running` aggiornano lo stato prima della lettura e la UI effettua
+una sola richiesta concorrente ogni otto secondi; polling e fetch vengono
+annullati quando il componente viene smontato e il polling termina allo stato
+`completed` o `failed`.
+
+Prima di raggiungere il browser, i log perdono le sequenze ANSI e vengono
+redatti per bearer token, password, secret assegnati e connection string. Ogni
+risposta è limitata a 128 KiB e ogni sessione di visualizzazione a 512 KiB. Il
+contenuto non viene persistito, scritto nei log applicativi o incluso negli
+audit: gli eventi contengono solo contatori, stato, identificatore hash e
+correlation ID sanificato.
 
 ## GitHub Actions
 
@@ -384,7 +413,8 @@ Non è necessario `vercel.json`.
 
 ## Limitazioni note
 
-- Nessuna capability Hostinger aggiuntiva è implementata in questa fase.
+- Build e log sono esclusivamente read-only; deploy, restart, cache,
+  vulnerabilità e altre mutazioni non sono implementate.
 - Email delivery e recupero password non sono configurati.
 - La sincronizzazione Hostinger reale deve essere provata con un token di staging/non distruttivo.
 - Preview e Production devono usare database e secret appropriati ai rispettivi ambienti.
@@ -396,10 +426,8 @@ Non è necessario `vercel.json`.
 
 ## Prossima fase suggerita
 
-Implementare prima una capability read-only per elencare le build Node.js del
-solo sito già importato. Gli UUID build devono essere validati e, se necessario,
-associati al sito prima di esporre una lettura dei log. Mantenere endpoint
-specifici server-only, payload minimali, audit senza contenuti dei log,
-paginazione controllata, gestione 429/5xx e default-deny. Solo dopo questi
-vincoli aggiungere la lettura del singolo build log; nessuna operazione di
-deploy, restart o modifica va accorpata al modulo read-only.
+Validare build e log con un account di staging non distruttivo, osservando
+paginazione, stati attivi, `from_line` e rate limit reali. Solo in una fase
+separata progettare eventuali operazioni di deploy o restart con permission,
+conferme, idempotenza e audit specifici; nessuna scrittura Hostinger è compresa
+in questa release.

@@ -3,7 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("post-import overview boundary", () => {
-  it("shows verified site identity and Node.js state without operational data", () => {
+  it("shows verified site identity and implemented build observability", () => {
     const source = readFileSync(
       path.resolve(
         process.cwd(),
@@ -18,10 +18,9 @@ describe("post-import overview boundary", () => {
     expect(source).toContain("sites.lastSyncedAt");
     expect(source).toContain("Configured site connection verified");
     expect(source).toContain(
-      "Builds and logs are registered but not implemented",
+      "Read-only build history and sanitized logs available",
     );
     expect(source).not.toContain("HOSTINGER_API_TOKEN");
     expect(source).not.toContain("build.uuid");
-    expect(source).not.toContain("build.log");
   });
 });

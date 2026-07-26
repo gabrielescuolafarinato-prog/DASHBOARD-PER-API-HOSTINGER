@@ -77,8 +77,9 @@ export default async function SiteSettingsPage() {
               </div>
             </div>
             <p className="mt-4 text-xs leading-5 text-slate-400">
-              The site identity was verified during OWNER onboarding. No
-              operational Hostinger action is exposed in this module yet.
+              The site identity was verified during OWNER onboarding. Build
+              history and sanitized build logs are available read-only from
+              the dedicated Node.js builds area.
             </p>
           </Card>
         </div>

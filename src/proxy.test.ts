@@ -41,6 +41,8 @@ describe("protected pages", () => {
   it("identifies every dashboard area as protected", () => {
     expect(isProtectedPath("/team")).toBe(true);
     expect(isProtectedPath("/audit-log")).toBe(true);
+    expect(isProtectedPath("/builds")).toBe(true);
+    expect(isProtectedPath("/builds/123/logs")).toBe(true);
     expect(isProtectedPath("/onboarding")).toBe(true);
     expect(isProtectedPath("/login")).toBe(false);
   });

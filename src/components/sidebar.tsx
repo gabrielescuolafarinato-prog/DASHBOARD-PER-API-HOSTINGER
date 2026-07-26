@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  Blocks,
   FileClock,
   Gauge,
   Settings2,
@@ -14,6 +15,7 @@ import { cn } from "@/lib/utils";
 
 const items = [
   { href: "/overview", label: "Overview", icon: Gauge },
+  { href: "/builds", label: "Node.js builds", icon: Blocks },
   { href: "/team", label: "Team", icon: Users },
   { href: "/site-settings", label: "Site settings", icon: Settings2 },
   { href: "/capabilities", label: "Capabilities", icon: Activity },
@@ -35,7 +37,8 @@ export function Sidebar() {
       </div>
       <nav className="flex gap-1 overflow-x-auto px-3 pb-3 lg:block lg:space-y-1 lg:px-3 lg:py-5">
         {items.map((item) => {
-          const active = pathname === item.href;
+          const active =
+            pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
               key={item.href}

@@ -21,8 +21,8 @@ export type HostingerCapability = {
 };
 
 const entries = [
-  ["node.builds.list", "Node.js builds", "SITE_DIRECT", "PLANNED", "List builds for the bound site."],
-  ["node.build.logs", "Build logs", "SITE_RESOURCE", "PLANNED", "Read logs for a build UUID bound to the site."],
+  ["node.builds.list", "Node.js builds", "SITE_DIRECT", "IMPLEMENTED", "List validated builds for the bound site."],
+  ["node.build.logs", "Build logs", "SITE_RESOURCE", "IMPLEMENTED", "Read sanitized logs only for a build UUID bound to the site."],
   ["node.deploy.archive", "Deploy from archive", "SITE_DIRECT", "PLANNED", "Deploy a validated server-side archive."],
   ["node.restart", "Restart Node.js", "SITE_DIRECT", "PLANNED", "Restart only the configured site."],
   ["site.vulnerabilities", "Vulnerabilities", "SITE_DIRECT", "PLANNED", "Read vulnerability data scoped to the site."],

@@ -132,9 +132,9 @@ export default async function OverviewPage() {
               ok={hostingerConfigured && site?.status === "VERIFIED"}
             />
             <StatusRow
-              label="Future capabilities"
-              detail="Builds and logs are registered but not implemented"
-              ok={false}
+              label="Build observability"
+              detail="Read-only build history and sanitized logs available"
+              ok
             />
           </div>
         </Card>

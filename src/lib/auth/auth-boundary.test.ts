@@ -34,6 +34,8 @@ describe("authentication boundary architecture", () => {
       "src/app/(dashboard)/audit-log/page.tsx",
       "src/app/(dashboard)/site-settings/page.tsx",
       "src/app/(dashboard)/capabilities/page.tsx",
+      "src/app/(dashboard)/builds/page.tsx",
+      "src/app/(dashboard)/builds/[uuid]/page.tsx",
     ];
 
     for (const page of pages) {
@@ -78,6 +80,8 @@ describe("authentication boundary architecture", () => {
       "src/app/(dashboard)/audit-log/page.tsx",
       "src/app/(dashboard)/site-settings/page.tsx",
       "src/app/(dashboard)/capabilities/page.tsx",
+      "src/app/(dashboard)/builds/page.tsx",
+      "src/app/(dashboard)/builds/[uuid]/page.tsx",
     ];
 
     for (const page of pages) {

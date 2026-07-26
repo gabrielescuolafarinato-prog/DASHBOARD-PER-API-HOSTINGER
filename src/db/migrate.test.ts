@@ -121,14 +121,14 @@ describe("migration connection selection", () => {
 
 describe("migration runner lifecycle and verification", () => {
   it("closes the Pool after success and verifies the registered count", async () => {
-    const fixture = createDependencies({ appliedCount: 2 });
+    const fixture = createDependencies({ appliedCount: 3 });
     const result = await runMigrations({
       env: { DATABASE_MIGRATION_URL: safeUrls.migration },
       migrationsFolder: path.resolve("drizzle"),
       dependencies: fixture.dependencies,
     });
 
-    expect(result).toEqual({ expectedCount: 2, appliedCount: 2 });
+    expect(result).toEqual({ expectedCount: 3, appliedCount: 3 });
     expect(fixture.applyMigrations).toHaveBeenCalledOnce();
     expect(fixture.end).toHaveBeenCalledOnce();
     expect(fixture.query).toHaveBeenCalledWith(
@@ -164,7 +164,7 @@ describe("migration runner lifecycle and verification", () => {
     ).rejects.toMatchObject({
       operation: "migration verification",
       safeDetails:
-        "Expected 2 registered migrations but found 1. No migration metadata was changed.",
+        "Expected 3 registered migrations but found 1. No migration metadata was changed.",
     });
     expect(fixture.end).toHaveBeenCalledOnce();
   });
@@ -227,7 +227,7 @@ function createDependencies(options?: {
   appliedCount?: number;
   migrationError?: unknown;
 }) {
-  const appliedCount = options?.appliedCount ?? 2;
+  const appliedCount = options?.appliedCount ?? 3;
   const query = vi.fn(async (queryText: string) => {
     if (queryText.includes("to_regclass")) {
       return {
@@ -252,7 +252,9 @@ function createDependencies(options?: {
     createPool: vi.fn(() => pool),
     applyMigrations,
     readTextFile: vi.fn(async () =>
-      JSON.stringify({ entries: [{ idx: 0 }, { idx: 1 }] }),
+      JSON.stringify({
+        entries: [{ idx: 0 }, { idx: 1 }, { idx: 2 }],
+      }),
     ),
     info,
     error,

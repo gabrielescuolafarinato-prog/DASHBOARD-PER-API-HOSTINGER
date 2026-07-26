@@ -152,6 +152,159 @@ describe("Hostinger client", () => {
     ).rejects.toMatchObject({ code: "HOSTINGER_ERROR" });
   });
 
+  it("validates and normalizes a paginated Node.js build response", async () => {
+    const buildUuid = "69f07fe2-197a-4fb3-9dae-606f965ad13d";
+    const { client, fetchImpl } = clientWith({
+      data: [
+        {
+          uuid: buildUuid,
+          state: "running",
+          options: {
+            source_type: "archive",
+            archive_path: "/private/archive.zip",
+            build_script: "secret-command",
+          },
+          created_at: "2024-05-29T05:49:49.067239Z",
+          updated_at: "2024-05-29T05:50:49.067239Z",
+          raw_private_field: "must-not-reach-browser",
+        },
+      ],
+      meta: { current_page: 2, per_page: 25, total: 76 },
+    });
+
+    const result = await client.listNodeBuilds("u1", "example.com", {
+      page: 2,
+      perPage: 25,
+    });
+
+    expect(result).toEqual({
+      builds: [
+        {
+          uuid: buildUuid,
+          state: "running",
+          origin: "archive",
+          createdAt: "2024-05-29T05:49:49.067239Z",
+          updatedAt: "2024-05-29T05:50:49.067239Z",
+        },
+      ],
+      pagination: {
+        page: 2,
+        perPage: 25,
+        total: 76,
+        totalPages: 4,
+        hasPrevious: true,
+        hasNext: true,
+      },
+      correlationId: "corr-1",
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "https://developers.hostinger.com/api/hosting/v1/accounts/u1/websites/example.com/nodejs/builds?page=2&per_page=25",
+    );
+    expect(JSON.stringify(result)).not.toMatch(
+      /raw_private_field|archive_path|secret-command/,
+    );
+  });
+
+  it.each([
+    {
+      data: [{ uuid: "not-a-uuid", state: "running" }],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    },
+    {
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "unknown",
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    },
+    {
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "running",
+        },
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "running",
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 2 },
+    },
+    {
+      data: [],
+      meta: { current_page: 2, per_page: 25, total: 0 },
+    },
+  ])("rejects a malformed build page", async (body) => {
+    const { client } = clientWith(body);
+    await expect(
+      client.listNodeBuilds("u1", "example.com", {
+        page: 1,
+        perPage: 25,
+      }),
+    ).rejects.toMatchObject({
+      code: "HOSTINGER_ERROR",
+      message: "Hostinger returned an invalid response.",
+    });
+  });
+
+  it("retrieves build logs with a validated UUID and from_line", async () => {
+    const buildUuid = "69f07fe2-197a-4fb3-9dae-606f965ad13d";
+    const { client, fetchImpl } = clientWith({
+      logs: "\u001b[32mbuild complete\u001b[0m",
+      lines: 12,
+    });
+    await expect(
+      client.getNodeBuildLogs("u1", "example.com", buildUuid, 10),
+    ).resolves.toEqual({
+      logs: "\u001b[32mbuild complete\u001b[0m",
+      lines: 12,
+      correlationId: "corr-1",
+    });
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      `https://developers.hostinger.com/api/hosting/v1/accounts/u1/websites/example.com/nodejs/builds/${buildUuid}/logs?from_line=10`,
+    );
+  });
+
+  it("rejects malformed log payloads", async () => {
+    const { client } = clientWith({ logs: ["raw"], lines: -1 });
+    await expect(
+      client.getNodeBuildLogs(
+        "u1",
+        "example.com",
+        "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+        0,
+      ),
+    ).rejects.toMatchObject({ code: "HOSTINGER_ERROR", status: 502 });
+  });
+
+  it("maps an aborted request to a controlled timeout", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(
+      async (_input, init) =>
+        await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    );
+    const client = new HostingerClient({
+      token: "never-log-this",
+      fetchImpl,
+      timeoutMs: 1,
+    });
+    await expect(
+      client.listNodeBuilds("u1", "example.com", {
+        page: 1,
+        perPage: 25,
+      }),
+    ).rejects.toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 504,
+      message: "The Hostinger request timed out.",
+    });
+  });
+
   it("never serializes the bearer token in results or controlled errors", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       response(200, {

@@ -6,6 +6,8 @@ const noStoreHeaders = {
   "Cache-Control": "private, no-store, max-age=0",
 };
 
+const REFERENCE_ID_PATTERN = /^[a-f0-9]{12}$/;
+
 export function apiSuccess<T>(data: T) {
   return NextResponse.json(
     { ok: true as const, data },
@@ -40,6 +42,11 @@ export function apiFailure(error: unknown) {
               : error.message,
           retryAfterSeconds:
             error.code === "RATE_LIMITED" ? 30 : undefined,
+          referenceId:
+            error.referenceId &&
+            REFERENCE_ID_PATTERN.test(error.referenceId)
+              ? error.referenceId
+              : undefined,
         },
       },
       { status: error.status, headers },

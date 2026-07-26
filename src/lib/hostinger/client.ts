@@ -2,6 +2,7 @@ import "server-only";
 import { z } from "zod";
 import { AppError } from "@/lib/errors";
 import { getHostingerEnv } from "@/lib/env";
+import { reportBuildResponseDiagnostic } from "./build-response-diagnostic";
 import { normalizeDomain } from "./domain";
 
 export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
@@ -32,10 +33,12 @@ export const nodeBuildStates = [
 
 export type NodeBuildState = (typeof nodeBuildStates)[number];
 
+export type NodeBuildOrigin = "archive" | "github" | "other";
+
 export type NodeBuildSummary = {
   uuid: string;
   state: NodeBuildState;
-  origin?: "archive";
+  origin?: NodeBuildOrigin;
   createdAt?: string;
   updatedAt?: string;
 };
@@ -71,40 +74,63 @@ type HostingerResponse = {
   correlationId?: string;
 };
 
+const PAGINATION_DIGITS_PATTERN = /^\d+$/;
+const MAX_BUILD_PAGE = 10_000;
+const MAX_BUILD_PAGE_SIZE = 100;
+const MAX_BUILD_TOTAL = 100_000_000;
+
+const hostingerBuildOptionsSchema = z
+  .object({
+    source_type: z.unknown().optional(),
+  })
+  .passthrough()
+  .nullable()
+  .optional();
+
 const hostingerBuildSchema = z.object({
   uuid: z.string().uuid(),
   state: z.enum(nodeBuildStates),
-  options: z
-    .object({
-      source_type: z.literal("archive").nullable().optional(),
-    })
-    .passthrough()
-    .nullable()
-    .optional(),
-  created_at: z.iso.datetime({ offset: true }).optional(),
-  updated_at: z.iso.datetime({ offset: true }).optional(),
+  options: hostingerBuildOptionsSchema,
+  created_at: z.unknown().optional(),
+  updated_at: z.unknown().optional(),
 });
 
+function strictPaginationInteger(min: number, max: number) {
+  return z.preprocess(
+    (value) =>
+      typeof value === "string" && PAGINATION_DIGITS_PATTERN.test(value)
+        ? Number(value)
+        : value,
+    z.number().int().min(min).max(max),
+  );
+}
+
 const hostingerBuildPageSchema = z.object({
-  data: z.array(hostingerBuildSchema).superRefine((items, context) => {
-    const seen = new Set<string>();
-    for (const [index, item] of items.entries()) {
-      if (seen.has(item.uuid)) {
-        context.addIssue({
-          code: "custom",
-          message: "Duplicate build UUID.",
-          path: [index, "uuid"],
-        });
+  data: z
+    .array(hostingerBuildSchema)
+    .max(MAX_BUILD_PAGE_SIZE)
+    .superRefine((items, context) => {
+      const seen = new Set<string>();
+      for (const [index, item] of items.entries()) {
+        if (seen.has(item.uuid)) {
+          context.addIssue({
+            code: "custom",
+            message: "Duplicate build UUID.",
+            path: [index, "uuid"],
+          });
+        }
+        seen.add(item.uuid);
       }
-      seen.add(item.uuid);
-    }
-  }),
+    }),
   meta: z.object({
-    current_page: z.number().int().min(1),
-    per_page: z.number().int().min(1).max(100),
-    total: z.number().int().nonnegative(),
+    current_page: strictPaginationInteger(1, MAX_BUILD_PAGE),
+    per_page: strictPaginationInteger(1, MAX_BUILD_PAGE_SIZE),
+    total: strictPaginationInteger(0, MAX_BUILD_TOTAL),
   }),
 });
+
+const hostingerTimestampSchema = z.iso.datetime({ offset: true });
+const BUILD_SOURCE_TYPE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
 
 const hostingerBuildLogsSchema = z.object({
   logs: z.string().max(1_000_000).nullable(),
@@ -132,12 +158,13 @@ function correlationId(response: Response, payload: unknown) {
   }
 }
 
-function malformedResponse(correlationId?: string) {
+function malformedResponse(correlationId?: string, referenceId?: string) {
   return new AppError(
     "HOSTINGER_ERROR",
     "Hostinger returned an invalid response.",
     502,
     correlationId,
+    referenceId,
   );
 }
 
@@ -388,12 +415,13 @@ export class HostingerClient {
       )}/nodejs/builds?${parameters.toString()}`,
     );
     const parsed = hostingerBuildPageSchema.safeParse(response.payload);
-    if (
-      !parsed.success ||
-      parsed.data.meta.current_page !== pagination.page ||
-      parsed.data.meta.per_page !== pagination.perPage
-    ) {
-      throw malformedResponse(response.correlationId);
+    if (!parsed.success) {
+      const referenceId = reportBuildResponseDiagnostic(
+        response.payload,
+        parsed.error,
+        response.correlationId,
+      );
+      throw malformedResponse(response.correlationId, referenceId);
     }
 
     const { current_page: page, per_page: perPage, total } = parsed.data.meta;
@@ -402,9 +430,9 @@ export class HostingerClient {
       builds: parsed.data.data.map((build) => ({
         uuid: build.uuid,
         state: build.state,
-        origin: build.options?.source_type ?? undefined,
-        createdAt: build.created_at,
-        updatedAt: build.updated_at,
+        origin: normalizeBuildOrigin(build.options),
+        createdAt: normalizeBuildTimestamp(build.created_at),
+        updatedAt: normalizeBuildTimestamp(build.updated_at),
       })),
       pagination: {
         page,
@@ -453,6 +481,22 @@ export class HostingerClient {
       correlationId: response.correlationId,
     };
   }
+}
+
+function normalizeBuildOrigin(
+  options: z.infer<typeof hostingerBuildOptionsSchema>,
+): NodeBuildOrigin | undefined {
+  const sourceType = options?.source_type;
+  if (typeof sourceType !== "string") return undefined;
+  const normalized = sourceType.trim().toLowerCase();
+  if (!BUILD_SOURCE_TYPE_PATTERN.test(normalized)) return undefined;
+  if (normalized === "archive" || normalized === "github") return normalized;
+  return "other";
+}
+
+function normalizeBuildTimestamp(value: unknown) {
+  const parsed = hostingerTimestampSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 export function createHostingerClient() {

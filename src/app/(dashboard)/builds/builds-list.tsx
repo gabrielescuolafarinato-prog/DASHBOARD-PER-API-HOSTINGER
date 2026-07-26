@@ -14,7 +14,12 @@ type ApiResult =
   | { ok: true; data: NodeBuildPage }
   | {
       ok: false;
-      error: { code: string; message: string; retryAfterSeconds?: number };
+      error: {
+        code: string;
+        message: string;
+        retryAfterSeconds?: number;
+        referenceId?: string;
+      };
     };
 
 export function BuildsList() {
@@ -43,11 +48,20 @@ export function BuildsList() {
       const body = (await response.json()) as ApiResult;
       if (!response.ok || !body.ok) {
         throw new Error(
-          body.ok ? "Builds could not be loaded." : body.error.message,
+          body.ok
+            ? "Builds could not be loaded."
+            : [
+                body.error.message,
+                body.error.referenceId
+                  ? `Reference: ${body.error.referenceId}`
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(" "),
         );
       }
       setResult(body.data);
-      setPage(targetPage);
+      setPage(body.data.pagination.page);
     } catch (loadError) {
       if (
         loadError instanceof DOMException &&

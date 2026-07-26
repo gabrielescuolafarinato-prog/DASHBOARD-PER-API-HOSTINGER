@@ -152,7 +152,7 @@ describe("Hostinger client", () => {
     ).rejects.toMatchObject({ code: "HOSTINGER_ERROR" });
   });
 
-  it("validates and normalizes a paginated Node.js build response", async () => {
+  it("validates and normalizes the official data and meta response shape", async () => {
     const buildUuid = "69f07fe2-197a-4fb3-9dae-606f965ad13d";
     const { client, fetchImpl } = clientWith({
       data: [
@@ -207,6 +207,163 @@ describe("Hostinger client", () => {
 
   it.each([
     {
+      name: "GitHub source",
+      options: { source_type: "github", repository: "must-not-escape" },
+      expectedOrigin: "github",
+    },
+    {
+      name: "future source",
+      options: { source_type: "gitlab-future", private: "must-not-escape" },
+      expectedOrigin: "other",
+    },
+    {
+      name: "null options",
+      options: null,
+      expectedOrigin: undefined,
+    },
+    {
+      name: "unsafe source metadata",
+      options: {
+        source_type: "private source value that is much too long to expose",
+      },
+      expectedOrigin: undefined,
+    },
+  ])("normalizes $name without exposing options", async ({
+    options,
+    expectedOrigin,
+  }) => {
+    const { client } = clientWith({
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "completed",
+          options,
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    });
+
+    const result = await client.listNodeBuilds("u1", "example.com", {
+      page: 1,
+      perPage: 25,
+    });
+
+    expect(result.builds[0].origin).toBe(expectedOrigin);
+    expect(JSON.stringify(result)).not.toMatch(
+      /repository|private|must-not-escape|gitlab-future/,
+    );
+  });
+
+  it("accepts absent options, nullable timestamps and extra fields", async () => {
+    const { client } = clientWith({
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "pending",
+          created_at: null,
+          updated_at: null,
+          future_field: { nested: "must-not-escape" },
+        },
+      ],
+      meta: {
+        current_page: 1,
+        per_page: 25,
+        total: 1,
+        future_meta: "must-not-escape",
+      },
+      future_top_level: "must-not-escape",
+    });
+
+    const result = await client.listNodeBuilds("u1", "example.com", {
+      page: 1,
+      perPage: 25,
+    });
+
+    expect(result.builds).toEqual([
+      {
+        uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+        state: "pending",
+        origin: undefined,
+        createdAt: undefined,
+        updatedAt: undefined,
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(
+      /future_field|future_meta|future_top_level|must-not-escape/,
+    );
+  });
+
+  it("preserves valid timestamps and omits invalid optional timestamps", async () => {
+    const { client } = clientWith({
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "running",
+          created_at: "2024-05-29T05:49:49.067239Z",
+          updated_at: "not-a-timestamp",
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    });
+
+    const result = await client.listNodeBuilds("u1", "example.com", {
+      page: 1,
+      perPage: 25,
+    });
+
+    expect(result.builds[0]).toMatchObject({
+      createdAt: "2024-05-29T05:49:49.067239Z",
+      updatedAt: undefined,
+    });
+    expect(result.builds[0].updatedAt).not.toBe("Invalid Date");
+  });
+
+  it("accepts strictly numeric pagination strings within bounds", async () => {
+    const { client } = clientWith({
+      data: [],
+      meta: { current_page: "0002", per_page: "25", total: "76" },
+    });
+
+    await expect(
+      client.listNodeBuilds("u1", "example.com", {
+        page: 1,
+        perPage: 10,
+      }),
+    ).resolves.toMatchObject({
+      pagination: {
+        page: 2,
+        perPage: 25,
+        total: 76,
+        totalPages: 4,
+        hasPrevious: true,
+        hasNext: true,
+      },
+    });
+  });
+
+  it.each(["1.0", "1e0", " 1", "+1", "-1", "1x"])(
+    "rejects non-digit pagination string %j",
+    async (currentPage) => {
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      const { client } = clientWith({
+        data: [],
+        meta: { current_page: currentPage, per_page: 25, total: 0 },
+      });
+
+      await expect(
+        client.listNodeBuilds("u1", "example.com", {
+          page: 1,
+          perPage: 25,
+        }),
+      ).rejects.toMatchObject({ code: "HOSTINGER_ERROR", status: 502 });
+      consoleError.mockRestore();
+    },
+  );
+
+  it.each([
+    {
       data: [{ uuid: "not-a-uuid", state: "running" }],
       meta: { current_page: 1, per_page: 25, total: 1 },
     },
@@ -234,9 +391,36 @@ describe("Hostinger client", () => {
     },
     {
       data: [],
-      meta: { current_page: 2, per_page: 25, total: 0 },
+      meta: { current_page: 10_001, per_page: 25, total: 0 },
+    },
+    {
+      data: [],
+      meta: { current_page: 1, per_page: 101, total: 0 },
+    },
+    {
+      data: [],
+      meta: { current_page: 1, per_page: 25, total: 100_000_001 },
+    },
+    {
+      data: [
+        {
+          uuid: "69f07fe2-197a-4fb3-9dae-606f965ad13d",
+          state: "running",
+          options: [],
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    },
+    {
+      meta: { current_page: 1, per_page: 25, total: 0 },
+    },
+    {
+      data: [],
     },
   ])("rejects a malformed build page", async (body) => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
     const { client } = clientWith(body);
     await expect(
       client.listNodeBuilds("u1", "example.com", {
@@ -247,6 +431,81 @@ describe("Hostinger client", () => {
       code: "HOSTINGER_ERROR",
       message: "Hostinger returned an invalid response.",
     });
+    consoleError.mockRestore();
+  });
+
+  it("logs only an allowlisted diagnostic and returns its reference ID", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const sensitiveUuid = "69f07fe2-197a-4fb3-9dae-606f965ad13d";
+    const { client } = clientWith({
+      data: [
+        {
+          uuid: sensitiveUuid,
+          options: {
+            domain: "private.example",
+            username: "private-user",
+            token: "private-token",
+            url: "https://private.example/query?secret=yes",
+          },
+          stack: "private-stack",
+          arbitrary: "private-arbitrary-value",
+        },
+      ],
+      meta: { current_page: 1, per_page: 25, total: 1 },
+    });
+
+    let caught: unknown;
+    try {
+      await client.listNodeBuilds("u1", "example.com", {
+        page: 1,
+        perPage: 25,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 502,
+      referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+    });
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(consoleError.mock.calls[0][0]).toBe(
+      "hostinger_build_response_diagnostic",
+    );
+    expect(consoleError.mock.calls[0][1]).toEqual({
+      referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+      phase: "build_list_decode",
+      correlationId: "corr-1",
+      category: "missing_required_fields",
+      itemCount: 1,
+      missingFields: ["state"],
+      zodPaths: ["data.*.state"],
+      zodCodes: ["invalid_value"],
+    });
+    expect((caught as { referenceId?: string }).referenceId).toBe(
+      (consoleError.mock.calls[0][1] as { referenceId: string }).referenceId,
+    );
+    const serializedDiagnostic = JSON.stringify(consoleError.mock.calls);
+    expect(serializedDiagnostic).not.toMatch(
+      new RegExp(
+        [
+          sensitiveUuid,
+          "private\\.example",
+          "private-user",
+          "private-token",
+          "https://",
+          "secret=yes",
+          "private-stack",
+          "private-arbitrary-value",
+          "options",
+        ].join("|"),
+        "i",
+      ),
+    );
+    consoleError.mockRestore();
   });
 
   it("retrieves build logs with a validated UUID and from_line", async () => {

@@ -39,6 +39,45 @@ describe("controlled build API errors", () => {
     });
   });
 
+  it("returns only the safe reference ID for a malformed build response", async () => {
+    const response = apiFailure(
+      new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger returned an invalid response.",
+        502,
+        "corr-private",
+        "a1b2c3d4e5f6",
+      ),
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "HOSTINGER_ERROR",
+        message: "Hostinger returned an invalid response.",
+        referenceId: "a1b2c3d4e5f6",
+      },
+    });
+  });
+
+  it("does not expose an invalid reference ID", async () => {
+    const response = apiFailure(
+      new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger returned an invalid response.",
+        502,
+        "corr-private",
+        "raw-reference value",
+      ),
+    );
+
+    expect(JSON.stringify(await response.json())).not.toContain(
+      "raw-reference",
+    );
+  });
+
   it("does not expose unknown errors, stacks or raw responses", async () => {
     const response = apiFailure(
       new Error(

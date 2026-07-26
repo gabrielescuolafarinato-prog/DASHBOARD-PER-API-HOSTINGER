@@ -540,7 +540,7 @@ export function buildImportStateQuery(input: {
         SELECT count(*)::int
         FROM target_sites
         WHERE hostinger_username = ${input.username}
-          AND status = 'VERIFIED'
+          AND status = 'VERIFIED'::site_status
           AND node_enabled = true
       ) AS verified_node_match_count,
       (
@@ -555,7 +555,7 @@ export function buildImportStateQuery(input: {
         INNER JOIN target_sites target
           ON target.id = membership.site_id
         WHERE membership.user_id = ${input.actorUserId}::uuid
-          AND membership.role = 'ADMIN'
+          AND membership.role = 'ADMIN'::membership_role
       ) AS owner_admin_membership_count,
       (
         SELECT count(*)::int
@@ -638,10 +638,10 @@ export function buildAtomicImportQuery(input: {
             ON existing_membership.site_id = existing_site.id
           WHERE lower(existing_site.primary_domain) = lower(${input.domain})
             AND existing_site.hostinger_username = ${input.username}
-            AND existing_site.status = 'VERIFIED'
+            AND existing_site.status = 'VERIFIED'::site_status
             AND existing_site.node_enabled = true
             AND existing_membership.user_id = ${input.actorUserId}::uuid
-            AND existing_membership.role = 'ADMIN'
+            AND existing_membership.role = 'ADMIN'::membership_role
         ) AS already_completed
       FROM import_lock
     ),
@@ -674,7 +674,7 @@ export function buildAtomicImportQuery(input: {
         ${input.username},
         ${input.orderId ?? null},
         true,
-        'VERIFIED',
+        'VERIFIED'::site_status,
         now(),
         now(),
         now()
@@ -685,7 +685,7 @@ export function buildAtomicImportQuery(input: {
         hostinger_username = EXCLUDED.hostinger_username,
         hostinger_order_id = EXCLUDED.hostinger_order_id,
         node_enabled = true,
-        status = 'VERIFIED',
+        status = 'VERIFIED'::site_status,
         last_synced_at = now(),
         updated_at = now()
       WHERE sites.hostinger_username = EXCLUDED.hostinger_username
@@ -696,11 +696,11 @@ export function buildAtomicImportQuery(input: {
       SELECT
         site_write.id,
         ${input.actorUserId}::uuid,
-        'ADMIN',
+        'ADMIN'::membership_role,
         now()
       FROM site_write
       ON CONFLICT (site_id, user_id) DO UPDATE SET
-        role = 'ADMIN'
+        role = 'ADMIN'::membership_role
       RETURNING site_id
     ),
     binding_write AS (
@@ -743,7 +743,7 @@ export function buildAtomicImportQuery(input: {
         END,
         'site',
         ${targetHash},
-        'SUCCESS',
+        'SUCCESS'::audit_result,
         jsonb_strip_nulls(
           jsonb_build_object(
             'outcome',
@@ -772,7 +772,7 @@ export function buildAtomicImportQuery(input: {
         'hostinger_site_import_conflict',
         'site',
         ${targetHash},
-        'FAILURE',
+        'FAILURE'::audit_result,
         jsonb_build_object('reason', decision.conflict_reason),
         now()
       FROM decision
@@ -985,20 +985,20 @@ function logImportDiagnostic(input: {
 }
 
 function databaseErrorMetadata(error: unknown) {
-  const record =
-    error && typeof error === "object"
-      ? (error as Record<string, unknown>)
-      : undefined;
-  const postgresCode =
-    typeof record?.code === "string" &&
-    /^[A-Z0-9]{5}$/.test(record.code)
-      ? record.code
-      : undefined;
-  const constraint =
-    typeof record?.constraint === "string" &&
-    SAFE_DATABASE_CONSTRAINTS.has(record.constraint)
-      ? record.constraint
-      : undefined;
+  const chain = safeErrorCauseChain(error);
+  const postgresCode = chain
+    .map((record) => record.code)
+    .find(
+      (code): code is string =>
+        typeof code === "string" && /^[A-Z0-9]{5}$/.test(code),
+    );
+  const constraint = chain
+    .map((record) => record.constraint)
+    .find(
+      (value): value is string =>
+        typeof value === "string" &&
+        SAFE_DATABASE_CONSTRAINTS.has(value),
+    );
   const candidateType = error instanceof Error ? error.name : typeof error;
   const errorType = SAFE_ERROR_TYPES.has(candidateType)
     ? candidateType
@@ -1007,6 +1007,26 @@ function databaseErrorMetadata(error: unknown) {
       : "UnknownError";
   return { postgresCode, constraint, errorType };
 }
+
+function safeErrorCauseChain(error: unknown) {
+  const chain: Record<string, unknown>[] = [];
+  const visited = new Set<object>();
+  let current = error;
+
+  for (let depth = 0; depth < MAX_ERROR_CAUSE_DEPTH; depth += 1) {
+    if (!current || typeof current !== "object" || visited.has(current)) {
+      break;
+    }
+    visited.add(current);
+    const record = current as Record<string, unknown>;
+    chain.push(record);
+    current = record.cause;
+  }
+
+  return chain;
+}
+
+const MAX_ERROR_CAUSE_DEPTH = 4;
 
 const SAFE_DATABASE_CONSTRAINTS = new Set([
   "sites_primary_domain_unique",
@@ -1060,10 +1080,5 @@ async function writeImportAuditSafely(input: {
 }
 
 function isUniqueViolation(error: unknown) {
-  return Boolean(
-    error &&
-      typeof error === "object" &&
-      "code" in error &&
-      (error as { code?: unknown }).code === "23505",
-  );
+  return databaseErrorMetadata(error).postgresCode === "23505";
 }

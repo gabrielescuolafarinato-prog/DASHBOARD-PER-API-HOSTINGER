@@ -1,5 +1,4 @@
-import { readFileSync } from "node:fs";
-import path from "node:path";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HostingerClient } from "./client";
 
@@ -14,6 +13,8 @@ vi.mock("@/lib/audit", () => ({
 }));
 
 import {
+  buildAtomicImportQuery,
+  buildImportStateQuery,
   decodeImportQueryResult,
   importVerifiedConfiguredSite,
   precheckConfiguredHostingerSite,
@@ -483,21 +484,145 @@ describe("atomic Hostinger site import", () => {
     consoleError.mockRestore();
   });
 
-  it("keeps all writes, lock and required audit operations in the atomic statement", () => {
-    const source = readFileSync(
-      path.resolve(process.cwd(), "src/lib/hostinger/site-sync.ts"),
-      "utf8",
+  it("extracts PostgreSQL metadata from a bounded circular cause chain", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const adapterError = new Error("adapter query and secret-token");
+    const postgresError = Object.assign(
+      new Error("invalid input for audit_result"),
+      {
+        name: "PostgresError",
+        code: "42804",
+        constraint: "audit_events_site_id_sites_id_fk",
+        query: "SELECT secret-token",
+        stack: "postgresql://secret",
+        cause: adapterError,
+      },
     );
-    expect(source).toContain("pg_advisory_xact_lock");
-    expect(source).toContain("WITH import_lock AS MATERIALIZED");
-    expect(source).toContain("INSERT INTO sites");
-    expect(source).toContain("INSERT INTO site_memberships");
-    expect(source).toContain("INSERT INTO hostinger_resource_bindings");
-    expect(source).toContain("INSERT INTO audit_events");
-    expect(source).toContain("hostinger_site_imported");
-    expect(source).toContain("hostinger_site_import_already_completed");
-    expect(source).toContain("hostinger_site_import_conflict");
-    expect(source).toContain("FROM import_lock");
+    Object.assign(adapterError, { cause: postgresError });
+
+    await importVerifiedConfiguredSite("actor-1", verifiedSite, {
+      executeImport: vi.fn().mockRejectedValue(adapterError),
+      queryState: stateExecutor(emptyState()),
+    });
+
+    const diagnostic = consoleError.mock.calls[0][1];
+    expect(diagnostic).toEqual(
+      expect.objectContaining({
+        postgresCode: "42804",
+        constraint: "audit_events_site_id_sites_id_fk",
+        errorType: "Error",
+      }),
+    );
+    const logged = JSON.stringify(consoleError.mock.calls);
+    expect(logged).not.toMatch(
+      /adapter query|invalid input|secret-token|SELECT|postgresql:\/\/|stack/i,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("does not log a constraint outside the diagnostic allowlist", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const wrapped = Object.assign(new Error("adapter"), {
+      cause: {
+        code: "23503",
+        constraint: "customer_private_secret_constraint",
+      },
+    });
+
+    await importVerifiedConfiguredSite("actor-1", verifiedSite, {
+      executeImport: vi.fn().mockRejectedValue(wrapped),
+      queryState: stateExecutor(emptyState()),
+    });
+
+    expect(consoleError.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        postgresCode: "23503",
+        constraint: undefined,
+      }),
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "customer_private_secret_constraint",
+    );
+    consoleError.mockRestore();
+  });
+
+  it("recognizes a wrapped unique violation without exposing its cause", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const wrapped = Object.assign(new Error("adapter secret-token"), {
+      cause: { code: "23505", detail: "other-customer.com" },
+    });
+
+    await expect(
+      importVerifiedConfiguredSite("actor-1", verifiedSite, {
+        executeImport: vi.fn().mockRejectedValue(wrapped),
+        queryState: stateExecutor(emptyState()),
+      }),
+    ).resolves.toEqual({
+      type: "single_site_conflict",
+      reason: "unique_violation",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+      /secret-token|other-customer\.com/i,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("renders explicit PostgreSQL enum casts in every raw enum context", () => {
+    const atomicSql = renderQuery(
+      buildAtomicImportQuery({
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+        orderId: "order-1",
+        correlationId: "corr-1",
+      }),
+    );
+    const stateSql = renderQuery(
+      buildImportStateQuery({
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+        orderId: "order-1",
+      }),
+    );
+    const sqlText = `${atomicSql}\n${stateSql}`;
+
+    expect(atomicSql.match(/'SUCCESS'::audit_result/g)).toHaveLength(1);
+    expect(atomicSql.match(/'FAILURE'::audit_result/g)).toHaveLength(1);
+    expect(sqlText).not.toMatch(
+      /'(?:SUCCESS|FAILURE)'(?!::audit_result)/,
+    );
+    expect(sqlText).not.toMatch(/'ADMIN'(?!::membership_role)/);
+    expect(sqlText).not.toMatch(/'VERIFIED'(?!::site_status)/);
+  });
+
+  it("keeps every write and the advisory lock consumed by the final query", () => {
+    const query = renderQuery(
+      buildAtomicImportQuery({
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+      }),
+    );
+    expect(query).toContain("pg_advisory_xact_lock");
+    expect(query).toContain("WITH import_lock AS MATERIALIZED");
+    expect(query).toContain("FROM import_lock");
+    expect(query).toContain("FROM decision");
+    expect(query).toContain("FROM site_write");
+    expect(query).toContain("INNER JOIN membership_write");
+    expect(query).toContain("INNER JOIN binding_write");
+    expect(query).toContain("INNER JOIN audit_write");
+    expect(query).toContain("ON CONFLICT ((lower(primary_domain)))");
+    expect(query).toContain("ON CONFLICT (site_id, user_id)");
+    expect(query).toContain(
+      "ON CONFLICT (site_id, resource_type, external_id)",
+    );
   });
 });
 
@@ -567,6 +692,10 @@ function stateExecutor(
 
 function completeStateExecutor() {
   return stateExecutor(completeState());
+}
+
+function renderQuery(query: Parameters<PgDialect["sqlToQuery"]>[0]) {
+  return new PgDialect().sqlToQuery(query).sql;
 }
 
 function fakeClient(input: {

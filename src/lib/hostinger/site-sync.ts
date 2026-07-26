@@ -752,7 +752,7 @@ export function buildAtomicImportQuery(input: {
               ELSE 'imported'
             END,
             'correlationId',
-            ${safeCorrelationId}
+            ${safeCorrelationId}::text
           )
         ),
         now()

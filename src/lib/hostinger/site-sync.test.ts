@@ -484,18 +484,27 @@ describe("atomic Hostinger site import", () => {
     consoleError.mockRestore();
   });
 
-  it("extracts PostgreSQL metadata from a bounded circular cause chain", async () => {
+  it("extracts SQLSTATE 42P18 from error.cause without exposing diagnostics", async () => {
     const consoleError = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
-    const adapterError = new Error("adapter query and secret-token");
+    const adapterError = Object.assign(
+      new Error("adapter query and secret-token"),
+      {
+        query: "SELECT secret-token",
+        parameters: ["secret-token", "other-customer.com"],
+        connectionString: "postgresql://secret",
+      },
+    );
     const postgresError = Object.assign(
-      new Error("invalid input for audit_result"),
+      new Error("could not determine data type of parameter $18"),
       {
         name: "PostgresError",
-        code: "42804",
+        code: "42P18",
         constraint: "audit_events_site_id_sites_id_fk",
         query: "SELECT secret-token",
+        parameters: ["secret-token"],
+        detail: "other-customer.com",
         stack: "postgresql://secret",
         cause: adapterError,
       },
@@ -510,14 +519,14 @@ describe("atomic Hostinger site import", () => {
     const diagnostic = consoleError.mock.calls[0][1];
     expect(diagnostic).toEqual(
       expect.objectContaining({
-        postgresCode: "42804",
+        postgresCode: "42P18",
         constraint: "audit_events_site_id_sites_id_fk",
         errorType: "Error",
       }),
     );
     const logged = JSON.stringify(consoleError.mock.calls);
     expect(logged).not.toMatch(
-      /adapter query|invalid input|secret-token|SELECT|postgresql:\/\/|stack/i,
+      /adapter query|could not determine|secret-token|other-customer|SELECT|postgresql:\/\/|parameters|connectionString|stack/i,
     );
     consoleError.mockRestore();
   });
@@ -600,6 +609,128 @@ describe("atomic Hostinger site import", () => {
     );
     expect(sqlText).not.toMatch(/'ADMIN'(?!::membership_role)/);
     expect(sqlText).not.toMatch(/'VERIFIED'(?!::site_status)/);
+  });
+
+  it.each([
+    {
+      name: "a sanitized correlation ID",
+      correlationId: "corr-1",
+      expectedParameter: "corr-1",
+    },
+    {
+      name: "an omitted correlation ID",
+      correlationId: undefined,
+      expectedParameter: null,
+    },
+  ])(
+    "types the jsonb audit parameter as text with $name",
+    ({ correlationId, expectedParameter }) => {
+      const rendered = renderQueryWithParams(
+        buildAtomicImportQuery({
+          actorUserId: "11111111-1111-4111-8111-111111111111",
+          domain: "example.com",
+          username: "u1",
+          orderId: "order-1",
+          correlationId,
+        }),
+      );
+      const correlationPlaceholder = rendered.sql.match(
+        /'correlationId',\s*\$(\d+)::text/,
+      );
+
+      expect(correlationPlaceholder).not.toBeNull();
+      expect(
+        rendered.params[Number(correlationPlaceholder?.[1]) - 1],
+      ).toBe(expectedParameter);
+      expect(
+        untypedPlaceholdersInFunction(
+          rendered.sql,
+          "jsonb_build_object",
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it.each([
+    {
+      name: "a Hostinger order ID",
+      orderId: "order-1",
+      expectedParameter: "order-1",
+    },
+    {
+      name: "a null Hostinger order ID",
+      orderId: undefined,
+      expectedParameter: null,
+    },
+  ])(
+    "keeps orderId text-typed in atomic and state queries with $name",
+    ({ orderId, expectedParameter }) => {
+      const input = {
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+        orderId,
+      };
+      const atomic = renderQueryWithParams(buildAtomicImportQuery(input));
+      const state = renderQueryWithParams(buildImportStateQuery(input));
+
+      const atomicOrderPlaceholder = atomic.sql.match(
+        /SELECT\s+\$\d+,\s+\$\d+,\s+\$\d+,\s+\$(\d+),\s+true,\s+'VERIFIED'::site_status/,
+      );
+      const stateOrderPlaceholders = state.sql.match(
+        /WHERE \$(\d+)::text IS NULL\s+OR hostinger_order_id = \$(\d+)::text/,
+      );
+
+      expect(atomicOrderPlaceholder).not.toBeNull();
+      expect(
+        atomic.params[Number(atomicOrderPlaceholder?.[1]) - 1],
+      ).toBe(expectedParameter);
+      expect(stateOrderPlaceholders).not.toBeNull();
+      for (const placeholder of stateOrderPlaceholders?.slice(1) ?? []) {
+        expect(state.params[Number(placeholder) - 1]).toBe(
+          expectedParameter,
+        );
+      }
+    },
+  );
+
+  it("keeps UUID and enum casts while avoiding untyped polymorphic parameters", () => {
+    const atomicSql = renderQuery(
+      buildAtomicImportQuery({
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+        correlationId: "corr-1",
+      }),
+    );
+    const stateSql = renderQuery(
+      buildImportStateQuery({
+        actorUserId: "11111111-1111-4111-8111-111111111111",
+        domain: "example.com",
+        username: "u1",
+      }),
+    );
+
+    expect(atomicSql.match(/\$\d+::uuid/g)).toHaveLength(5);
+    expect(stateSql.match(/\$\d+::uuid/g)).toHaveLength(2);
+    expect(atomicSql).toContain("'SUCCESS'::audit_result");
+    expect(atomicSql).toContain("'FAILURE'::audit_result");
+    expect(atomicSql).toContain("'VERIFIED'::site_status");
+    expect(atomicSql).toContain("'ADMIN'::membership_role");
+    expect(stateSql).toContain("'VERIFIED'::site_status");
+    expect(stateSql).toContain("'ADMIN'::membership_role");
+    expect(
+      untypedPlaceholdersInFunction(
+        atomicSql,
+        "jsonb_build_object",
+      ),
+    ).toEqual([]);
+    expect(
+      untypedPlaceholdersInFunction(
+        stateSql,
+        "jsonb_build_object",
+      ),
+    ).toEqual([]);
   });
 
   it("keeps every write and the advisory lock consumed by the final query", () => {
@@ -696,6 +827,63 @@ function completeStateExecutor() {
 
 function renderQuery(query: Parameters<PgDialect["sqlToQuery"]>[0]) {
   return new PgDialect().sqlToQuery(query).sql;
+}
+
+function renderQueryWithParams(
+  query: Parameters<PgDialect["sqlToQuery"]>[0],
+) {
+  return new PgDialect().sqlToQuery(query);
+}
+
+function untypedPlaceholdersInFunction(
+  sqlText: string,
+  functionName: string,
+) {
+  const calls = sqlFunctionCalls(sqlText, functionName);
+  return calls.flatMap(
+    (call) =>
+      call.match(
+        /\$\d+(?!\d)(?!::[a-z_][a-z0-9_]*)/gi,
+      ) ?? [],
+  );
+}
+
+function sqlFunctionCalls(sqlText: string, functionName: string) {
+  const calls: string[] = [];
+  const lowerSql = sqlText.toLowerCase();
+  const functionStart = `${functionName.toLowerCase()}(`;
+  let searchFrom = 0;
+
+  while (searchFrom < sqlText.length) {
+    const start = lowerSql.indexOf(functionStart, searchFrom);
+    if (start === -1) break;
+    let depth = 0;
+    let inString = false;
+
+    for (let index = start; index < sqlText.length; index += 1) {
+      const character = sqlText[index];
+      if (character === "'") {
+        if (inString && sqlText[index + 1] === "'") {
+          index += 1;
+          continue;
+        }
+        inString = !inString;
+      } else if (!inString && character === "(") {
+        depth += 1;
+      } else if (!inString && character === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          calls.push(sqlText.slice(start, index + 1));
+          searchFrom = index + 1;
+          break;
+        }
+      }
+    }
+
+    if (searchFrom <= start) break;
+  }
+
+  return calls;
 }
 
 function fakeClient(input: {

@@ -30,7 +30,12 @@ export function apiFailure(error: unknown) {
   }
   if (error instanceof AppError) {
     const headers: Record<string, string> = { ...noStoreHeaders };
-    if (error.code === "RATE_LIMITED") headers["Retry-After"] = "30";
+    const retryAfterSeconds =
+      error.retryAfterSeconds ??
+      (error.code === "RATE_LIMITED" ? 30 : undefined);
+    if (retryAfterSeconds !== undefined) {
+      headers["Retry-After"] = String(retryAfterSeconds);
+    }
     return NextResponse.json(
       {
         ok: false as const,
@@ -41,7 +46,7 @@ export function apiFailure(error: unknown) {
               ? "Hostinger is temporarily rate limited. Retry in a few moments."
               : error.message,
           retryAfterSeconds:
-            error.code === "RATE_LIMITED" ? 30 : undefined,
+            retryAfterSeconds,
           referenceId:
             error.referenceId &&
             REFERENCE_ID_PATTERN.test(error.referenceId)

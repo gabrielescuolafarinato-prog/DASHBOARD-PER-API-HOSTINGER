@@ -13,10 +13,10 @@ describe("Hostinger capability policy", () => {
     expect(getCapability("hostinger.environment").state).toBe("NOT_AVAILABLE");
   });
 
-  it("marks read-only build history and logs as implemented", () => {
+  it("marks only the delivered Node.js capabilities as implemented", () => {
     expect(getCapability("node.builds.list").state).toBe("IMPLEMENTED");
     expect(getCapability("node.build.logs").state).toBe("IMPLEMENTED");
+    expect(getCapability("node.restart").state).toBe("IMPLEMENTED");
     expect(getCapability("node.deploy.archive").state).toBe("PLANNED");
-    expect(getCapability("node.restart").state).toBe("PLANNED");
   });
 });

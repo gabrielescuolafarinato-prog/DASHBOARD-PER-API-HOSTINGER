@@ -3,20 +3,25 @@ import { getCurrentDashboardAccess } from "@/lib/auth/session";
 import { writeAuditEvent } from "@/lib/audit";
 import { AppError } from "@/lib/errors";
 import {
-  hasNodeReadPermission,
-  type NodeReadPermission,
+  hasHostingerSiteAccess,
+  type HostingerSiteCapability,
 } from "./permissions";
 
-export async function requireNodeApiAccess(permission: NodeReadPermission) {
+export async function requireHostingerApiAccess(
+  capability: HostingerSiteCapability,
+) {
   const state = await getCurrentDashboardAccess();
   if (state.status === "authenticated") {
     if (
-      hasNodeReadPermission(state.current.site.membershipRole, permission)
+      hasHostingerSiteAccess(
+        state.current.site.membershipRole,
+        capability,
+      )
     ) {
       return state.current;
     }
     await auditDenied(state.current.user.id, state.current.site.siteId, {
-      permission,
+      capability,
       reason: "permission_denied",
     });
     throw new AppError("FORBIDDEN", "Permission denied.", 403);
@@ -24,7 +29,7 @@ export async function requireNodeApiAccess(permission: NodeReadPermission) {
 
   const actorUserId = "current" in state ? state.current.user.id : undefined;
   await auditDenied(actorUserId, undefined, {
-    permission,
+    capability,
     reason: state.status,
   });
 
@@ -65,7 +70,7 @@ export async function requireNodeApiAccess(permission: NodeReadPermission) {
 async function auditDenied(
   actorUserId: string | undefined,
   siteId: string | undefined,
-  metadata: { permission: NodeReadPermission; reason: string },
+  metadata: { capability: HostingerSiteCapability; reason: string },
 ) {
   try {
     await writeAuditEvent({

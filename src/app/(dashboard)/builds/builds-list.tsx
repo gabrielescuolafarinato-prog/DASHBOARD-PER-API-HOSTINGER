@@ -9,6 +9,7 @@ import type {
   NodeBuildPage,
   NodeBuildState,
 } from "@/lib/hostinger/client";
+import { NODE_RESTARTED_EVENT } from "./restart-submission-guard";
 
 type ApiResult =
   | { ok: true; data: NodeBuildPage }
@@ -86,6 +87,17 @@ export function BuildsList() {
       controller.current?.abort();
     };
   }, [load]);
+
+  useEffect(() => {
+    const refreshAfterRestart = () => void load(page);
+    window.addEventListener(NODE_RESTARTED_EVENT, refreshAfterRestart);
+    return () => {
+      window.removeEventListener(
+        NODE_RESTARTED_EVENT,
+        refreshAfterRestart,
+      );
+    };
+  }, [load, page]);
 
   return (
     <Card className="overflow-hidden p-0" aria-busy={loading}>

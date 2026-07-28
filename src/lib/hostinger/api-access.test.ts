@@ -12,7 +12,7 @@ vi.mock("@/lib/audit", () => ({
   writeAuditEvent: dependencies.writeAuditEvent,
 }));
 
-import { requireNodeApiAccess } from "./api-access";
+import { requireHostingerApiAccess } from "./api-access";
 
 beforeEach(() => {
   dependencies.getCurrentDashboardAccess.mockReset();
@@ -28,7 +28,7 @@ describe("build API access boundary", () => {
         authenticatedState(membershipRole),
       );
       await expect(
-        requireNodeApiAccess("node.deployments.read"),
+        requireHostingerApiAccess("node.restart"),
       ).resolves.toMatchObject({
         user: { id: "actor-1" },
         site: { siteId: "site-1", membershipRole },
@@ -42,7 +42,7 @@ describe("build API access boundary", () => {
       current: { user: { id: "actor-1" } },
     });
     await expect(
-      requireNodeApiAccess("node.deployments.read"),
+      requireHostingerApiAccess("node.builds.list"),
     ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
     expect(dependencies.writeAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -59,14 +59,14 @@ describe("build API access boundary", () => {
       status: "inactive_user",
     });
     await expect(
-      requireNodeApiAccess("node.logs.read"),
+      requireHostingerApiAccess("node.build.logs"),
     ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
     expect(dependencies.writeAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         actorUserId: undefined,
         operation: "hostinger_access_denied",
         metadata: {
-          permission: "node.logs.read",
+          capability: "node.build.logs",
           reason: "inactive_user",
         },
       }),
@@ -78,7 +78,7 @@ describe("build API access boundary", () => {
       status: "missing_session",
     });
     await expect(
-      requireNodeApiAccess("node.deployments.read"),
+      requireHostingerApiAccess("node.builds.list"),
     ).rejects.toMatchObject({ code: "UNAUTHENTICATED", status: 401 });
   });
 });

@@ -15,8 +15,8 @@ import {
 import { buildMigrationRequiredError } from "./build-schema-diagnostic";
 import { sanitizeBuildLogs } from "./log-sanitizer";
 import {
-  hasNodeReadPermission,
-  type NodeReadPermission,
+  assertHostingerSiteAccess,
+  type HostingerSiteCapability,
 } from "./permissions";
 
 export type BuildAccessContext = {
@@ -44,7 +44,7 @@ export async function listBuildsForSite(
   pagination: { page: number; perPage: number },
   dependencies: BuildServiceDependencies = {},
 ) {
-  assertPermission(current.site, "node.deployments.read");
+  assertPermission(current.site, "node.builds.list");
   const client = dependencies.client ?? createHostingerClient();
   const audit = dependencies.audit ?? writeAuditEvent;
   let page: NodeBuildPage;
@@ -87,7 +87,7 @@ export async function getBuildLogsForSite(
   input: { uuid: string; fromLine: number },
   dependencies: BuildServiceDependencies = {},
 ) {
-  assertPermission(current.site, "node.logs.read");
+  assertPermission(current.site, "node.build.logs");
   const audit = dependencies.audit ?? writeAuditEvent;
   const findBuild = dependencies.findBuild ?? findSiteBuild;
   let build = await findBuild(current.site.siteId, input.uuid);
@@ -99,7 +99,10 @@ export async function getBuildLogsForSite(
       targetType: "site_build",
       targetIdentifier: input.uuid,
       result: "DENIED",
-      metadata: { permission: "node.logs.read", reason: "unbound_build" },
+      metadata: {
+        capability: "node.build.logs",
+        reason: "unbound_build",
+      },
     });
     throw new AppError("NOT_FOUND", "Build not found.", 404);
   }
@@ -270,11 +273,9 @@ export function isActiveBuild(state: NodeBuildState) {
 
 function assertPermission(
   site: SiteAccessRecord,
-  permission: NodeReadPermission,
+  capability: HostingerSiteCapability,
 ) {
-  if (!hasNodeReadPermission(site.membershipRole, permission)) {
-    throw new AppError("FORBIDDEN", "Permission denied.", 403);
-  }
+  assertHostingerSiteAccess(site.membershipRole, capability);
 }
 
 async function auditHostingerError(

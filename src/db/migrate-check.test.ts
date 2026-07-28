@@ -23,11 +23,13 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies();
 
     await expect(check(fixture.dependencies)).resolves.toEqual({
-      expectedCount: 3,
-      appliedCount: 3,
+      expectedCount: 4,
+      appliedCount: 4,
       migrationPending: false,
       siteBuildsPresent: true,
       buildStatePresent: true,
+      hostingerOperationsPresent: true,
+      hostingerOperationStatusPresent: true,
     });
     expect(fixture.end).toHaveBeenCalledOnce();
   });
@@ -36,7 +38,7 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies({ appliedCount: 2 });
 
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
-      expectedCount: 3,
+      expectedCount: 4,
       appliedCount: 2,
       migrationPending: true,
     });
@@ -46,7 +48,7 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies({ migrationTablePresent: false });
 
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
-      expectedCount: 3,
+      expectedCount: 4,
       appliedCount: 0,
       migrationPending: true,
     });
@@ -63,6 +65,8 @@ describe("read-only migration status check", () => {
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
       siteBuildsPresent: false,
       buildStatePresent: true,
+      hostingerOperationsPresent: true,
+      hostingerOperationStatusPresent: true,
     });
   });
 
@@ -72,6 +76,20 @@ describe("read-only migration status check", () => {
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
       siteBuildsPresent: true,
       buildStatePresent: false,
+      hostingerOperationsPresent: true,
+      hostingerOperationStatusPresent: true,
+    });
+  });
+
+  it("reports the durable Hostinger operation objects as absent", async () => {
+    const fixture = createDependencies({
+      hostingerOperationsPresent: false,
+      hostingerOperationStatusPresent: false,
+    });
+
+    await expect(check(fixture.dependencies)).resolves.toMatchObject({
+      hostingerOperationsPresent: false,
+      hostingerOperationStatusPresent: false,
     });
   });
 
@@ -102,11 +120,13 @@ describe("read-only migration status check", () => {
 
     expect(fixture.info.mock.calls.flat()).toEqual([
       "Database connection: succeeded.",
-      "Expected migrations: 3.",
-      "Applied migrations: 3.",
+      "Expected migrations: 4.",
+      "Applied migrations: 4.",
       "Migration pending: no.",
       "Required object public.site_builds present: yes.",
       "Required object public.build_state present: yes.",
+      "Required object public.hostinger_operations present: yes.",
+      "Required object public.hostinger_operation_status present: yes.",
     ]);
     const output = JSON.stringify([
       fixture.info.mock.calls,
@@ -130,6 +150,8 @@ function createDependencies(options?: {
   migrationTablePresent?: boolean;
   siteBuildsPresent?: boolean;
   buildStatePresent?: boolean;
+  hostingerOperationsPresent?: boolean;
+  hostingerOperationStatusPresent?: boolean;
 }) {
   const query = vi.fn(async (statement: string) => {
     if (statement.includes("to_regclass")) {
@@ -148,13 +170,21 @@ function createDependencies(options?: {
               options?.buildStatePresent === false
                 ? null
                 : "public.build_state",
+            hostinger_operations:
+              options?.hostingerOperationsPresent === false
+                ? null
+                : "public.hostinger_operations",
+            hostinger_operation_status:
+              options?.hostingerOperationStatusPresent === false
+                ? null
+                : "public.hostinger_operation_status",
           },
         ],
       };
     }
     if (statement.includes("count(*)")) {
       return {
-        rows: [{ migration_count: options?.appliedCount ?? 3 }],
+        rows: [{ migration_count: options?.appliedCount ?? 4 }],
       };
     }
     return { rows: [{ value: 1 }] };
@@ -165,7 +195,12 @@ function createDependencies(options?: {
     createPool: vi.fn(() => pool),
     readTextFile: vi.fn(async () =>
       JSON.stringify({
-        entries: [{ idx: 0 }, { idx: 1 }, { idx: 2 }],
+        entries: [
+          { idx: 0 },
+          { idx: 1 },
+          { idx: 2 },
+          { idx: 3 },
+        ],
       }),
     ),
     info: vi.fn(),

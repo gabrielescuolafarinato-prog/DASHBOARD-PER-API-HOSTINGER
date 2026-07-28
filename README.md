@@ -1,6 +1,6 @@
 # Hostinger Single-Site Console
 
-Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, elenco build e log build read-only con policy capability default-deny.
+Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, elenco build e log build read-only e riavvio controllato del server Node.js con policy capability default-deny.
 
 ## Stack e requisiti
 
@@ -178,6 +178,10 @@ Le migration correnti sono:
 2. `0001_public_sway.sql`: indici univoci case-insensitive per email e dominio.
 3. `0002_last_oracle.sql`: enum stato build e binding `site_builds` con UUID
    Hostinger globale univoco, foreign key al sito e indici di lettura.
+4. `0003_hostinger_operations.sql`: registro durevole e riutilizzabile delle
+   mutazioni Hostinger, stato operazione, chiave idempotente hashata, reference
+   ID, correlation ID sanificato e vincolo di una sola operazione attiva per
+   sito e tipo.
 
 Drizzle registra le migration applicate in
 `drizzle.__drizzle_migrations`: rieseguire `npm run db:migrate` è idempotente e
@@ -198,10 +202,11 @@ $LASTEXITCODE
 Il check usa lo stesso parsing sicuro delle variabili del runner, verifica la
 connessione, confronta il numero di righe in
 `drizzle.__drizzle_migrations` con il journal locale e controlla
-`public.site_builds` e `public.build_state` esclusivamente tramite query
-`SELECT`. Stampa soltanto stato della connessione, conteggi, presenza di
-migration pendenti e presenza degli oggetti richiesti. Restituisce `0` soltanto
-quando lo schema locale atteso è completamente disponibile.
+`public.site_builds`, `public.build_state`, `public.hostinger_operations` e
+`public.hostinger_operation_status` esclusivamente tramite query `SELECT`.
+Stampa soltanto stato della connessione, conteggi, presenza di migration
+pendenti e presenza degli oggetti richiesti. Restituisce `0` soltanto quando lo
+schema locale atteso è completamente disponibile.
 
 Per applicare le migration e controllare il vero exit code in PowerShell:
 
@@ -355,15 +360,24 @@ raggiungono mai il client, il database o l’audit.
 - COLLABORATOR senza membership negato secondo la policy not-found esistente.
 - Una sola membership verso un sito `VERIFIED` abilita la dashboard; membership
   multiple, orfane o verso siti non utilizzabili falliscono in modo chiuso.
-- `OWNER` e `COLLABORATOR` avranno gli stessi permessi operativi sul sito; solo configurazione e gestione utenti restano OWNER-only.
+- Ogni utente attivo, non bannato, con sessione e membership valide sul sito
+  configurato può usare tutte le capability Hostinger registrate, implementate
+  e site-scoped.
+- Le membership `ADMIN` e `MEMBER` hanno la stessa policy Hostinger fissa:
+  non esistono grant per utente, ruoli Hostinger personalizzabili o pannelli di
+  capability per collaboratore.
+- `OWNER` e `COLLABORATOR` hanno quindi gli stessi permessi operativi
+  Hostinger sul sito; onboarding, configurazione locale e gestione account
+  dashboard restano OWNER-only.
 - Sito, username, dominio ed external ID vengono risolti dal server.
 - Capability non registrate vengono negate.
 - Non esiste un proxy Hostinger generico.
 - L’Overview mostra identità del sito, stato dell’infrastruttura e contatori
-  derivati dal registro capability. Build e log sono implementati in sola
-  lettura; DNS, database e operazioni di scrittura restano non implementati.
+  derivati dal registro capability. Build e log sono in sola lettura; il
+  restart Node.js è l’unica mutazione Hostinger implementata. Deploy, DNS,
+  database, cache e altre capability restano non implementati o negati.
 
-## Build Node.js e log read-only
+## Build Node.js, log e restart controllato
 
 La pagina `/builds` usa soltanto gli endpoint applicativi specifici
 `GET /api/builds` e `GET /api/builds/{uuid}/logs`. Ogni richiesta ricalcola
@@ -389,6 +403,33 @@ risposta è limitata a 128 KiB e ogni sessione di visualizzazione a 512 KiB. Il
 contenuto non viene persistito, scritto nei log applicativi o incluso negli
 audit: gli eventi contengono solo contatori, stato, identificatore hash e
 correlation ID sanificato.
+
+Il pannello operazioni di `/builds` espone il solo
+`POST /api/node/restart`. La richiesta accetta esclusivamente un body JSON
+vuoto e l’header `Idempotency-Key` in formato UUID: username, dominio, site ID,
+URL, metodo, order ID e token non sono parametri validi. Origin e
+`Sec-Fetch-Site` vengono verificati prima dell’autorizzazione; sessione, stato
+utente, membership, sito autorevole e capability `node.restart` vengono
+ricalcolati server-side.
+
+Il client server-only costruisce internamente
+`POST /api/hosting/v1/accounts/{username}/websites/{domain}/nodejs/server/restart`
+usando il record `sites`. La risposta Hostinger ufficiale vuota o con
+`message` stringa viene validata ma scartata; soltanto esito minimo e
+correlation ID sanificato restano nel backend.
+
+Prima della chiamata esterna, `hostinger_operations` registra la chiave UUID
+come hash SHA-256. Una singola istruzione PostgreSQL usa
+`pg_advisory_xact_lock` sul sito e tipo operazione, il vincolo univoco impedisce
+due operazioni `IN_PROGRESS` e un cooldown di 30 secondi blocca restart
+ravvicinati. La stessa chiave non chiama mai Hostinger due volte; operazioni
+rimaste attive oltre 120 secondi vengono chiuse come fallite prima di una nuova
+richiesta. Nessuna `Map` runtime partecipa alla garanzia.
+
+La UI applica anche un lock sincrono al submit, mostra una conferma esplicita,
+pending, successo o errore con reference ID e mantiene il pulsante disabilitato
+durante il cooldown. Dopo il successo aggiorna Overview e build una sola volta,
+senza navigazioni o polling aggiuntivi.
 
 ## GitHub Actions
 
@@ -456,21 +497,23 @@ Non è necessario `vercel.json`.
 
 ## Limitazioni note
 
-- Build e log sono esclusivamente read-only; deploy, restart, cache,
+- Build e log sono esclusivamente read-only; deploy, cache, DNS, database,
   vulnerabilità e altre mutazioni non sono implementate.
+- Le operazioni account-wide o non associabili con certezza al sito
+  configurato restano negate per tutti.
 - Email delivery e recupero password non sono configurati.
 - La sincronizzazione Hostinger reale deve essere provata con un token di staging/non distruttivo.
 - Preview e Production devono usare database e secret appropriati ai rispettivi ambienti.
 - I test automatici usano mock completi e non effettuano chiamate Hostinger o
   Neon Production.
 - La release corrente non espone un pulsante di riverifica dopo
-  l’onboarding; il modulo read-only successivo dovrà includere un health check
+  l’onboarding; una fase successiva dovrà includere un health check
   OWNER sicuro da usare anche durante la rotazione del token.
 
 ## Prossima fase suggerita
 
-Validare build e log con un account di staging non distruttivo, osservando
-paginazione, stati attivi, `from_line` e rate limit reali. Solo in una fase
-separata progettare eventuali operazioni di deploy o restart con permission,
-conferme, idempotenza e audit specifici; nessuna scrittura Hostinger è compresa
-in questa release.
+Validare build, log e restart con un account di staging controllato, osservando
+paginazione, stati attivi, `from_line`, cooldown, replay idempotente e rate
+limit reali. Progettare deploy da archivio, cache, DNS, database e ogni altra
+capability soltanto in fasi separate, mantenendo il confine single-site e il
+default-deny.

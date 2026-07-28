@@ -132,8 +132,8 @@ export default async function OverviewPage() {
               ok={hostingerConfigured && site?.status === "VERIFIED"}
             />
             <StatusRow
-              label="Build observability"
-              detail="Read-only build history and sanitized logs available"
+              label="Node.js operations"
+              detail="Build observability and scoped server restart available"
               ok
             />
           </div>

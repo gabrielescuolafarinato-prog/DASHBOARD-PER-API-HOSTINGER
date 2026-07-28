@@ -24,7 +24,7 @@ const entries = [
   ["node.builds.list", "Node.js builds", "SITE_DIRECT", "IMPLEMENTED", "List validated builds for the bound site."],
   ["node.build.logs", "Build logs", "SITE_RESOURCE", "IMPLEMENTED", "Read sanitized logs only for a build UUID bound to the site."],
   ["node.deploy.archive", "Deploy from archive", "SITE_DIRECT", "PLANNED", "Deploy a validated server-side archive."],
-  ["node.restart", "Restart Node.js", "SITE_DIRECT", "PLANNED", "Restart only the configured site."],
+  ["node.restart", "Restart Node.js", "SITE_DIRECT", "IMPLEMENTED", "Restart only the configured site's server process with durable idempotency and cooldown protection."],
   ["site.vulnerabilities", "Vulnerabilities", "SITE_DIRECT", "PLANNED", "Read vulnerability data scoped to the site."],
   ["site.cache", "Cache", "SITE_DIRECT", "PLANNED", "Manage cache for the configured site."],
   ["site.databases", "Databases", "SITE_RESOURCE", "PLANNED", "Manage only databases explicitly bound to the site."],

@@ -526,6 +526,119 @@ describe("Hostinger client", () => {
     );
   });
 
+  it("uses only the specific POST restart endpoint and normalizes its response", async () => {
+    const { client, fetchImpl } = clientWith({
+      message: "Request accepted",
+      future_field: "must-not-escape",
+    });
+
+    const result = await client.restartNodeServer(
+      "u1",
+      "EXAMPLE.com.",
+    );
+    expect(result).toEqual({
+      restarted: true,
+      correlationId: "corr-1",
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "https://developers.hostinger.com/api/hosting/v1/accounts/u1/websites/example.com/nodejs/server/restart",
+    );
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "POST" });
+    expect(fetchImpl.mock.calls[0][1]).not.toHaveProperty("body");
+    expect(JSON.stringify(result)).not.toContain("future_field");
+  });
+
+  it("accepts the official empty success variant without exposing a payload", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(null, {
+          status: 200,
+          headers: { "x-correlation-id": "corr-empty" },
+        }),
+      );
+    const client = new HostingerClient({
+      token: "server-token-value",
+      fetchImpl,
+    });
+    await expect(
+      client.restartNodeServer("u1", "example.com"),
+    ).resolves.toEqual({
+      restarted: true,
+      correlationId: "corr-empty",
+    });
+  });
+
+  it("drops a URL-shaped correlation header", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        response(
+          200,
+          { message: "Request accepted" },
+          { "x-correlation-id": "https://private.example/correlation" },
+        ),
+      );
+    const client = new HostingerClient({
+      token: "server-token-value",
+      fetchImpl,
+    });
+
+    await expect(
+      client.restartNodeServer("u1", "example.com"),
+    ).resolves.toEqual({ restarted: true });
+  });
+
+  it.each([
+    "raw response",
+    [],
+    { message: 42 },
+  ])("rejects a malformed restart response", async (body) => {
+    const { client } = clientWith(body);
+    await expect(
+      client.restartNodeServer("u1", "example.com"),
+    ).rejects.toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 502,
+    });
+  });
+
+  it.each<[number, AppErrorCode, number]>([
+    [401, "HOSTINGER_ERROR", 401],
+    [403, "HOSTINGER_ERROR", 403],
+    [404, "NOT_FOUND", 404],
+    [422, "HOSTINGER_ERROR", 422],
+    [429, "RATE_LIMITED", 429],
+    [503, "HOSTINGER_ERROR", 503],
+  ])(
+    "maps restart HTTP %i to a controlled application error",
+    async (status, code, mappedStatus) => {
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          response(status, {
+            error: "private adapter body",
+            correlation_id: "corr-restart",
+          }),
+        );
+      const client = new HostingerClient({
+        token: "private-token",
+        fetchImpl,
+      });
+      await expect(
+        client.restartNodeServer("u1", "example.com"),
+      ).rejects.toMatchObject({
+        code,
+        status: mappedStatus,
+        correlationId: "corr-restart",
+      });
+      await expect(
+        client.restartNodeServer("u1", "example.com"),
+      ).rejects.not.toThrow(/private adapter body|private-token/);
+    },
+  );
+
   it("rejects malformed log payloads", async () => {
     const { client } = clientWith({ logs: ["raw"], lines: -1 });
     await expect(
@@ -553,10 +666,7 @@ describe("Hostinger client", () => {
       timeoutMs: 1,
     });
     await expect(
-      client.listNodeBuilds("u1", "example.com", {
-        page: 1,
-        perPage: 25,
-      }),
+      client.restartNodeServer("u1", "example.com"),
     ).rejects.toMatchObject({
       code: "HOSTINGER_ERROR",
       status: 504,

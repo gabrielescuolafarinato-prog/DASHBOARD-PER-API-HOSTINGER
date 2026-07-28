@@ -62,6 +62,11 @@ export type NodeBuildLogs = {
   correlationId?: string;
 };
 
+export type NodeRestartResult = {
+  restarted: true;
+  correlationId?: string;
+};
+
 type ClientOptions = {
   token: string;
   fetchImpl?: typeof fetch;
@@ -73,6 +78,8 @@ type HostingerResponse = {
   payload: unknown;
   correlationId?: string;
 };
+
+type HostingerMethod = "GET" | "POST";
 
 const PAGINATION_DIGITS_PATTERN = /^\d+$/;
 const MAX_BUILD_PAGE = 10_000;
@@ -137,10 +144,18 @@ const hostingerBuildLogsSchema = z.object({
   lines: z.number().int().nonnegative().max(10_000_000),
 });
 
+const hostingerEmptySuccessSchema = z
+  .object({
+    message: z.string().max(500).optional(),
+  })
+  .passthrough();
+
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
 
 function sanitizeCorrelationId(value: unknown) {
-  return typeof value === "string" && CORRELATION_ID_PATTERN.test(value)
+  return typeof value === "string" &&
+    CORRELATION_ID_PATTERN.test(value) &&
+    !value.includes("://")
     ? value
     : undefined;
 }
@@ -293,12 +308,15 @@ export class HostingerClient {
     this.baseUrl = options.baseUrl ?? HOSTINGER_API_BASE_URL;
   }
 
-  private async request(path: string): Promise<HostingerResponse> {
+  private async request(
+    method: HostingerMethod,
+    path: string,
+  ): Promise<HostingerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
       const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-        method: "GET",
+        method,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
@@ -360,6 +378,7 @@ export class HostingerClient {
       username: configuredUsername,
     });
     const response = await this.request(
+      "GET",
       `/api/hosting/v1/websites?${parameters.toString()}`,
     );
     const records = responseRecords(
@@ -382,6 +401,7 @@ export class HostingerClient {
   ): Promise<NodeSiteProbe> {
     const domain = normalizeDomain(configuredDomain);
     const response = await this.request(
+      "GET",
       `/api/hosting/v1/accounts/${encodeURIComponent(
         configuredUsername,
       )}/websites/${encodeURIComponent(domain)}/nodejs/builds`,
@@ -408,6 +428,7 @@ export class HostingerClient {
       per_page: String(pagination.perPage),
     });
     const response = await this.request(
+      "GET",
       `/api/hosting/v1/accounts/${encodeURIComponent(
         configuredUsername,
       )}/websites/${encodeURIComponent(
@@ -465,6 +486,7 @@ export class HostingerClient {
       from_line: String(fromLine),
     });
     const response = await this.request(
+      "GET",
       `/api/hosting/v1/accounts/${encodeURIComponent(
         configuredUsername,
       )}/websites/${encodeURIComponent(
@@ -478,6 +500,29 @@ export class HostingerClient {
     return {
       logs: parsed.data.logs ?? "",
       lines: parsed.data.lines,
+      correlationId: response.correlationId,
+    };
+  }
+
+  async restartNodeServer(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<NodeRestartResult> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "POST",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(domain)}/nodejs/server/restart`,
+    );
+    if (
+      response.payload !== null &&
+      !hostingerEmptySuccessSchema.safeParse(response.payload).success
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+    return {
+      restarted: true,
       correlationId: response.correlationId,
     };
   }

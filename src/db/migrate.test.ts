@@ -121,14 +121,14 @@ describe("migration connection selection", () => {
 
 describe("migration runner lifecycle and verification", () => {
   it("closes the Pool after success and verifies the registered count", async () => {
-    const fixture = createDependencies({ appliedCount: 3 });
+    const fixture = createDependencies({ appliedCount: 4 });
     const result = await runMigrations({
       env: { DATABASE_MIGRATION_URL: safeUrls.migration },
       migrationsFolder: path.resolve("drizzle"),
       dependencies: fixture.dependencies,
     });
 
-    expect(result).toEqual({ expectedCount: 3, appliedCount: 3 });
+    expect(result).toEqual({ expectedCount: 4, appliedCount: 4 });
     expect(fixture.applyMigrations).toHaveBeenCalledOnce();
     expect(fixture.end).toHaveBeenCalledOnce();
     expect(fixture.query).toHaveBeenCalledWith(
@@ -138,19 +138,19 @@ describe("migration runner lifecycle and verification", () => {
   });
 
   it("remains safe to rerun when every migration is already registered", async () => {
-    const fixture = createDependencies({ appliedCount: 3 });
+    const fixture = createDependencies({ appliedCount: 4 });
     const options = {
       env: { DATABASE_MIGRATION_URL: safeUrls.migration },
       dependencies: fixture.dependencies,
     };
 
     await expect(runMigrations(options)).resolves.toEqual({
-      expectedCount: 3,
-      appliedCount: 3,
+      expectedCount: 4,
+      appliedCount: 4,
     });
     await expect(runMigrations(options)).resolves.toEqual({
-      expectedCount: 3,
-      appliedCount: 3,
+      expectedCount: 4,
+      appliedCount: 4,
     });
 
     expect(fixture.applyMigrations).toHaveBeenCalledTimes(2);
@@ -184,7 +184,7 @@ describe("migration runner lifecycle and verification", () => {
     ).rejects.toMatchObject({
       operation: "migration verification",
       safeDetails:
-        "Expected 3 registered migrations but found 1. No migration metadata was changed.",
+        "Expected 4 registered migrations but found 1. No migration metadata was changed.",
     });
     expect(fixture.end).toHaveBeenCalledOnce();
   });
@@ -247,7 +247,7 @@ function createDependencies(options?: {
   appliedCount?: number;
   migrationError?: unknown;
 }) {
-  const appliedCount = options?.appliedCount ?? 3;
+  const appliedCount = options?.appliedCount ?? 4;
   const query = vi.fn(async (queryText: string) => {
     if (queryText.includes("to_regclass")) {
       return {
@@ -273,7 +273,12 @@ function createDependencies(options?: {
     applyMigrations,
     readTextFile: vi.fn(async () =>
       JSON.stringify({
-        entries: [{ idx: 0 }, { idx: 1 }, { idx: 2 }],
+        entries: [
+          { idx: 0 },
+          { idx: 1 },
+          { idx: 2 },
+          { idx: 3 },
+        ],
       }),
     ),
     info,

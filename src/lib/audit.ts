@@ -4,9 +4,9 @@ import { getDb } from "@/db";
 import { auditEvents } from "@/db/schema";
 
 const forbiddenMetadataKeys =
-  /token|password|secret|authorization|cookie|connectionstring|stack|headers|raw|response|bearer/i;
+  /token|password|secret|authorization|cookie|connectionstring|stack|headers|raw|response|bearer|payload|username|domain|url|query|message/i;
 const secretLikeValue =
-  /(?:bearer\s+[^\s]+|postgres(?:ql)?:\/\/|-----BEGIN [A-Z ]+PRIVATE KEY-----)/i;
+  /(?:bearer\s+[^\s]+|postgres(?:ql)?:\/\/|https?:\/\/|-----BEGIN [A-Z ]+PRIVATE KEY-----)/i;
 
 export function sanitizeAuditMetadata(
   metadata?: Record<string, unknown>,

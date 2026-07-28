@@ -18,7 +18,7 @@ describe("post-import overview boundary", () => {
     expect(source).toContain("sites.lastSyncedAt");
     expect(source).toContain("Configured site connection verified");
     expect(source).toContain(
-      "Read-only build history and sanitized logs available",
+      "Build observability and scoped server restart available",
     );
     expect(source).not.toContain("HOSTINGER_API_TOKEN");
     expect(source).not.toContain("build.uuid");

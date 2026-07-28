@@ -99,6 +99,14 @@ describe("authoritative request session", () => {
     expect(state.membershipLimit).not.toHaveBeenCalled();
   });
 
+  it("rejects a banned user before resolving a site membership", async () => {
+    state.authSession = validAuthSession({ banned: true });
+    const { getCurrentSession } = await import("./session");
+
+    expect(await getCurrentSession()).toEqual({ status: "inactive_user" });
+    expect(state.membershipLimit).not.toHaveBeenCalled();
+  });
+
   it("distinguishes the mandatory password checkpoint", async () => {
     state.authSession = validAuthSession({ mustChangePassword: true });
     const { getCurrentSession, requireSession } = await import("./session");

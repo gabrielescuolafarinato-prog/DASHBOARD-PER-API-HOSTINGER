@@ -5,7 +5,7 @@ import { AppError } from "@/lib/errors";
 const mocks = vi.hoisted(() => ({
   listBuildsForSite: vi.fn(),
   parseBuildListSearchParams: vi.fn(),
-  requireNodeApiAccess: vi.fn(),
+  requireHostingerApiAccess: vi.fn(),
 }));
 
 vi.mock("@/lib/hostinger/build-service", () => ({
@@ -15,7 +15,7 @@ vi.mock("@/lib/hostinger/build-input", () => ({
   parseBuildListSearchParams: mocks.parseBuildListSearchParams,
 }));
 vi.mock("@/lib/hostinger/api-access", () => ({
-  requireNodeApiAccess: mocks.requireNodeApiAccess,
+  requireHostingerApiAccess: mocks.requireHostingerApiAccess,
 }));
 
 import { GET } from "./route";
@@ -23,8 +23,8 @@ import { GET } from "./route";
 beforeEach(() => {
   mocks.listBuildsForSite.mockReset();
   mocks.parseBuildListSearchParams.mockReset();
-  mocks.requireNodeApiAccess.mockReset();
-  mocks.requireNodeApiAccess.mockResolvedValue({
+  mocks.requireHostingerApiAccess.mockReset();
+  mocks.requireHostingerApiAccess.mockResolvedValue({
     user: { id: "22222222-2222-4222-8222-222222222222" },
     site: {
       siteId: "11111111-1111-4111-8111-111111111111",

@@ -1050,7 +1050,8 @@ const SAFE_ERROR_TYPES = new Set([
 
 function sanitizeCorrelationId(value: unknown) {
   return typeof value === "string" &&
-    /^[A-Za-z0-9._:/-]{1,200}$/.test(value)
+    /^[A-Za-z0-9._:/-]{1,200}$/.test(value) &&
+    !value.includes("://")
     ? value
     : undefined;
 }

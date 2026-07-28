@@ -21,6 +21,8 @@ export type MigrationCheckResult = {
   migrationPending: boolean;
   siteBuildsPresent: boolean;
   buildStatePresent: boolean;
+  hostingerOperationsPresent: boolean;
+  hostingerOperationStatusPresent: boolean;
 };
 
 export interface MigrationCheckDependencies {
@@ -77,15 +79,21 @@ export async function runMigrationCheck(options?: {
         migration_table: string | null;
         site_builds: string | null;
         build_state: string | null;
+        hostinger_operations: string | null;
+        hostinger_operation_status: string | null;
       }>(
         `SELECT
           to_regclass($1)::text AS migration_table,
           to_regclass($2)::text AS site_builds,
-          to_regtype($3)::text AS build_state`,
+          to_regtype($3)::text AS build_state,
+          to_regclass($4)::text AS hostinger_operations,
+          to_regtype($5)::text AS hostinger_operation_status`,
         [
           "drizzle.__drizzle_migrations",
           "public.site_builds",
           "public.build_state",
+          "public.hostinger_operations",
+          "public.hostinger_operation_status",
         ],
       );
       const objects = objectResult.rows[0];
@@ -110,6 +118,12 @@ export async function runMigrationCheck(options?: {
         migrationPending: appliedCount !== expectedCount,
         siteBuildsPresent: Boolean(objects?.site_builds),
         buildStatePresent: Boolean(objects?.build_state),
+        hostingerOperationsPresent: Boolean(
+          objects?.hostinger_operations,
+        ),
+        hostingerOperationStatusPresent: Boolean(
+          objects?.hostinger_operation_status,
+        ),
       };
     } catch (error) {
       if (error instanceof MigrationRunnerError) throw error;
@@ -150,9 +164,21 @@ export async function runMigrationCheckCli(
         result.buildStatePresent ? "yes" : "no"
       }.`,
     );
+    dependencies.info(
+      `Required object public.hostinger_operations present: ${
+        result.hostingerOperationsPresent ? "yes" : "no"
+      }.`,
+    );
+    dependencies.info(
+      `Required object public.hostinger_operation_status present: ${
+        result.hostingerOperationStatusPresent ? "yes" : "no"
+      }.`,
+    );
     return result.migrationPending ||
       !result.siteBuildsPresent ||
-      !result.buildStatePresent
+      !result.buildStatePresent ||
+      !result.hostingerOperationsPresent ||
+      !result.hostingerOperationStatusPresent
       ? 1
       : 0;
   } catch (error) {

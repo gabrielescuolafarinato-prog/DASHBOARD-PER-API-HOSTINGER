@@ -17,6 +17,7 @@ export class AppError extends Error {
     public readonly status: number,
     public readonly correlationId?: string,
     public readonly referenceId?: string,
+    public readonly retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "AppError";

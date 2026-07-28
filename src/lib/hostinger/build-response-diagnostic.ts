@@ -174,7 +174,9 @@ function categorize(
 }
 
 function sanitizeCorrelationId(value: unknown) {
-  return typeof value === "string" && CORRELATION_ID_PATTERN.test(value)
+  return typeof value === "string" &&
+    CORRELATION_ID_PATTERN.test(value) &&
+    !value.includes("://")
     ? value
     : undefined;
 }

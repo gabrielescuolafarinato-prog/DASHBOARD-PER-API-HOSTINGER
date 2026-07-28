@@ -22,16 +22,24 @@ describe("audit metadata", () => {
         correlationId: "corr-1",
       },
       rawResponse: { sites: ["other-customer.com"] },
+      payload: { arbitrary: "private" },
+      url: "https://private.example/path",
+      domain: "private.example",
+      username: "private-user",
+      query: "select secret from private",
+      stack: "private-stack",
     });
     expect(sanitized).toEqual({
       result: "failure",
       nested: {
-        message: "[REDACTED]",
         database: "[REDACTED]",
         correlationId: "corr-1",
       },
     });
     expect(JSON.stringify(sanitized)).not.toContain("should-never-appear");
     expect(JSON.stringify(sanitized)).not.toContain("other-customer.com");
+    expect(JSON.stringify(sanitized)).not.toMatch(
+      /private\.example|private-user|private-stack|select secret|https:\/\//,
+    );
   });
 });

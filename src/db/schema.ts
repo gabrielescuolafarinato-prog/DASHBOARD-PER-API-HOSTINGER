@@ -4,6 +4,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -37,6 +38,10 @@ export const buildStateEnum = pgEnum("build_state", [
   "completed",
   "failed",
 ]);
+export const hostingerOperationStatusEnum = pgEnum(
+  "hostinger_operation_status",
+  ["IN_PROGRESS", "SUCCEEDED", "FAILED"],
+);
 
 export const user = pgTable(
   "users",
@@ -218,6 +223,54 @@ export const siteBuilds = pgTable(
   ],
 );
 
+export const hostingerOperations = pgTable(
+  "hostinger_operations",
+  {
+    siteId: uuid("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "cascade" }),
+    actorUserId: uuid("actor_user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "restrict" }),
+    operationType: text("operation_type").notNull(),
+    idempotencyKeyHash: text("idempotency_key_hash").notNull(),
+    status: hostingerOperationStatusEnum("status")
+      .default("IN_PROGRESS")
+      .notNull(),
+    referenceId: text("reference_id").notNull(),
+    correlationId: text("correlation_id"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .$onUpdate(() => new Date())
+      .notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [
+    primaryKey({
+      name: "hostinger_operations_identity_pk",
+      columns: [
+        table.siteId,
+        table.operationType,
+        table.idempotencyKeyHash,
+      ],
+    }),
+    uniqueIndex("hostinger_operations_reference_unique").on(
+      table.referenceId,
+    ),
+    uniqueIndex("hostinger_operations_active_site_type_unique")
+      .on(table.siteId, table.operationType)
+      .where(sql`${table.status} = 'IN_PROGRESS'`),
+    index("hostinger_operations_site_created_idx").on(
+      table.siteId,
+      table.operationType,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const auditEvents = pgTable(
   "audit_events",
   {
@@ -250,6 +303,7 @@ export const schema = {
   siteMemberships,
   hostingerResourceBindings,
   siteBuilds,
+  hostingerOperations,
   auditEvents,
 };
 

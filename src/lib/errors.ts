@@ -6,6 +6,7 @@ export type AppErrorCode =
   | "CONFLICT"
   | "HOSTINGER_ERROR"
   | "HOSTINGER_NOT_NODE"
+  | "DATABASE_MIGRATION_REQUIRED"
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";
 

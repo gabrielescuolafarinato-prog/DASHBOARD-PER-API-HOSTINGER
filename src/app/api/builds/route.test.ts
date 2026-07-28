@@ -66,4 +66,31 @@ describe("GET /api/builds", () => {
       },
     });
   });
+
+  it("returns a controlled 503 when the build migration is required", async () => {
+    mocks.listBuildsForSite.mockRejectedValue(
+      new AppError(
+        "DATABASE_MIGRATION_REQUIRED",
+        "Database update required.",
+        503,
+        undefined,
+        "abcdef123456",
+      ),
+    );
+
+    const response = await GET(
+      new NextRequest("https://console.test/api/builds?page=1&per_page=25"),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "DATABASE_MIGRATION_REQUIRED",
+        message: "Database update required.",
+        referenceId: "abcdef123456",
+      },
+    });
+  });
 });

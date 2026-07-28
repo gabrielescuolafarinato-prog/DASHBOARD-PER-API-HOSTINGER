@@ -17,6 +17,7 @@
     "verify": "npm run typecheck && npm run lint && npm test && npm run build",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.ts",
+    "db:migrate:check": "tsx scripts/migrate-check.ts",
     "db:studio": "drizzle-kit studio",
     "user:bootstrap": "tsx scripts/bootstrap-owner.ts"
   },

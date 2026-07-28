@@ -12,6 +12,7 @@ import {
   type NodeBuildState,
   type NodeBuildSummary,
 } from "./client";
+import { buildMigrationRequiredError } from "./build-schema-diagnostic";
 import { sanitizeBuildLogs } from "./log-sanitizer";
 import {
   hasNodeReadPermission,
@@ -186,37 +187,42 @@ export async function syncSiteBuilds(
 ) {
   if (builds.length === 0) return;
   const now = new Date();
-  const rows = await getDb()
-    .insert(siteBuilds)
-    .values(
-      builds.map((build) => ({
-        siteId,
-        buildUuid: build.uuid,
-        state: build.state,
-        origin: build.origin ?? null,
-        hostingerCreatedAt: build.createdAt
-          ? new Date(build.createdAt)
-          : null,
-        hostingerUpdatedAt: build.updatedAt
-          ? new Date(build.updatedAt)
-          : null,
-        lastVerifiedAt: now,
-        updatedAt: now,
-      })),
-    )
-    .onConflictDoUpdate({
-      target: siteBuilds.buildUuid,
-      set: {
-        state: sql`excluded.state`,
-        origin: sql`excluded.origin`,
-        hostingerCreatedAt: sql`excluded.hostinger_created_at`,
-        hostingerUpdatedAt: sql`excluded.hostinger_updated_at`,
-        lastVerifiedAt: now,
-        updatedAt: now,
-      },
-      setWhere: eq(siteBuilds.siteId, siteId),
-    })
-    .returning({ uuid: siteBuilds.buildUuid });
+  let rows: { uuid: string }[];
+  try {
+    rows = await getDb()
+      .insert(siteBuilds)
+      .values(
+        builds.map((build) => ({
+          siteId,
+          buildUuid: build.uuid,
+          state: build.state,
+          origin: build.origin ?? null,
+          hostingerCreatedAt: build.createdAt
+            ? new Date(build.createdAt)
+            : null,
+          hostingerUpdatedAt: build.updatedAt
+            ? new Date(build.updatedAt)
+            : null,
+          lastVerifiedAt: now,
+          updatedAt: now,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: siteBuilds.buildUuid,
+        set: {
+          state: sql`excluded.state`,
+          origin: sql`excluded.origin`,
+          hostingerCreatedAt: sql`excluded.hostinger_created_at`,
+          hostingerUpdatedAt: sql`excluded.hostinger_updated_at`,
+          lastVerifiedAt: now,
+          updatedAt: now,
+        },
+        setWhere: eq(siteBuilds.siteId, siteId),
+      })
+      .returning({ uuid: siteBuilds.buildUuid });
+  } catch (error) {
+    throw buildMigrationRequiredError(error) ?? error;
+  }
 
   if (rows.length !== builds.length) {
     throw new AppError(

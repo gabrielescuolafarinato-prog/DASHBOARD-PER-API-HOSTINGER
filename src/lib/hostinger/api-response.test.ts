@@ -78,6 +78,33 @@ describe("controlled build API errors", () => {
     );
   });
 
+  it("returns a controlled 503 migration error without SQL details", async () => {
+    const response = apiFailure(
+      new AppError(
+        "DATABASE_MIGRATION_REQUIRED",
+        "Database update required.",
+        503,
+        undefined,
+        "abcdef123456",
+      ),
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    const body = JSON.stringify(await response.json());
+    expect(JSON.parse(body)).toEqual({
+      ok: false,
+      error: {
+        code: "DATABASE_MIGRATION_REQUIRED",
+        message: "Database update required.",
+        referenceId: "abcdef123456",
+      },
+    });
+    expect(body).not.toMatch(
+      /select|insert|site_builds|build_state|postgresql:\/\//i,
+    );
+  });
+
   it("does not expose unknown errors, stacks or raw responses", async () => {
     const response = apiFailure(
       new Error(

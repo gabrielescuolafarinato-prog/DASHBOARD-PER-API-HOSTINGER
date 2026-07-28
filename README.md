@@ -188,7 +188,22 @@ viene restituito soltanto dopo queste verifiche e la chiusura del pool.
 
 Il CLI carica prima `.env.local` e poi `.env`, senza sovrascrivere variabili già
 impostate nel processo e senza stampare valori o dettagli di connessione. Per
-eseguire le migration e controllare il vero exit code in PowerShell:
+verificare lo stato senza modificare il database:
+
+```powershell
+npm run db:migrate:check
+$LASTEXITCODE
+```
+
+Il check usa lo stesso parsing sicuro delle variabili del runner, verifica la
+connessione, confronta il numero di righe in
+`drizzle.__drizzle_migrations` con il journal locale e controlla
+`public.site_builds` e `public.build_state` esclusivamente tramite query
+`SELECT`. Stampa soltanto stato della connessione, conteggi, presenza di
+migration pendenti e presenza degli oggetti richiesti. Restituisce `0` soltanto
+quando lo schema locale atteso è completamente disponibile.
+
+Per applicare le migration e controllare il vero exit code in PowerShell:
 
 ```powershell
 npm run db:migrate
@@ -197,6 +212,34 @@ $LASTEXITCODE
 
 Il valore atteso è `0`; ogni errore di configurazione, connessione, migration,
 verifica o chiusura restituisce `1` con diagnostica sanificata.
+
+### Runbook migration Production su Vercel
+
+Le variabili configurate nel progetto Vercel non sono automaticamente
+disponibili nella shell locale. Il metodo preferito evita di salvarle su disco:
+
+```powershell
+vercel link
+vercel env ls production
+vercel env run -e production -- npm run db:migrate:check
+vercel env run -e production -- npm run db:migrate
+vercel env run -e production -- npm run db:migrate:check
+```
+
+Prima di procedere, verificare che la directory locale sia collegata al
+progetto Vercel corretto. Per `DATABASE_MIGRATION_URL` o
+`DATABASE_URL_UNPOOLED` usare una connection string Neon diretta/non pooled;
+non copiare connection string, credenziali o altri secret nei log, nella
+documentazione o nei comandi salvati.
+
+Il runner è idempotente: applica soltanto le migration pendenti registrandole
+in `drizzle.__drizzle_migrations`. Non usare `drizzle-kit push`. Eseguire il
+check finale e confermare che migration e oggetti richiesti siano presenti
+prima di aggiornare `/builds`.
+
+Le migration non devono essere aggiunte al Build Command Vercel, eseguite
+durante il build o lo startup, né avviate da richieste HTTP. Restano
+un’operazione amministrativa esplicita e separata.
 
 Per modifiche future allo schema, il flusso obbligatorio resta:
 

@@ -79,7 +79,9 @@ export async function readExpectedMigrationCount(
   }
 }
 
-function poolConfig(connectionString: string): PoolConfig {
+export function migrationPoolConfig(
+  connectionString: string,
+): PoolConfig {
   return {
     connectionString,
     ssl: { rejectUnauthorized: true },
@@ -88,6 +90,20 @@ function poolConfig(connectionString: string): PoolConfig {
     idleTimeoutMillis: 10_000,
     allowExitOnIdle: true,
   };
+}
+
+export function migrationConnectionConfiguration(
+  env: EnvironmentSource,
+) {
+  try {
+    return parseMigrationEnv(env);
+  } catch (error) {
+    throw new MigrationRunnerError(
+      "connection configuration",
+      error,
+      error instanceof ServerEnvironmentError ? error.message : undefined,
+    );
+  }
 }
 
 async function verifyAppliedMigrations(
@@ -139,20 +155,15 @@ export async function runMigrations(options?: {
     migrationsFolder,
     dependencies.readTextFile,
   );
-  let connectionString: string;
-  try {
-    ({ connectionString } = parseMigrationEnv(options?.env ?? process.env));
-  } catch (error) {
-    throw new MigrationRunnerError(
-      "connection configuration",
-      error,
-      error instanceof ServerEnvironmentError ? error.message : undefined,
-    );
-  }
+  const { connectionString } = migrationConnectionConfiguration(
+    options?.env ?? process.env,
+  );
 
   let pool: Pool;
   try {
-    pool = dependencies.createPool(poolConfig(connectionString));
+    pool = dependencies.createPool(
+      migrationPoolConfig(connectionString),
+    );
   } catch (error) {
     throw new MigrationRunnerError("pool creation", error);
   }

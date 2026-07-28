@@ -137,6 +137,26 @@ describe("migration runner lifecycle and verification", () => {
     );
   });
 
+  it("remains safe to rerun when every migration is already registered", async () => {
+    const fixture = createDependencies({ appliedCount: 3 });
+    const options = {
+      env: { DATABASE_MIGRATION_URL: safeUrls.migration },
+      dependencies: fixture.dependencies,
+    };
+
+    await expect(runMigrations(options)).resolves.toEqual({
+      expectedCount: 3,
+      appliedCount: 3,
+    });
+    await expect(runMigrations(options)).resolves.toEqual({
+      expectedCount: 3,
+      appliedCount: 3,
+    });
+
+    expect(fixture.applyMigrations).toHaveBeenCalledTimes(2);
+    expect(fixture.end).toHaveBeenCalledTimes(2);
+  });
+
   it("closes the Pool after a migration error", async () => {
     const fixture = createDependencies({
       migrationError: Object.assign(new Error("driver failed"), {

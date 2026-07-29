@@ -20,7 +20,7 @@ beforeEach(() => {
   dependencies.writeAuditEvent.mockResolvedValue(undefined);
 });
 
-describe("build API access boundary", () => {
+describe("Hostinger API access boundary", () => {
   it.each(["ADMIN", "MEMBER"] as const)(
     "allows an active %s membership",
     async (membershipRole) => {
@@ -28,7 +28,7 @@ describe("build API access boundary", () => {
         authenticatedState(membershipRole),
       );
       await expect(
-        requireHostingerApiAccess("node.restart"),
+        requireHostingerApiAccess("database.list"),
       ).resolves.toMatchObject({
         user: { id: "actor-1" },
         site: { siteId: "site-1", membershipRole },
@@ -42,7 +42,7 @@ describe("build API access boundary", () => {
       current: { user: { id: "actor-1" } },
     });
     await expect(
-      requireHostingerApiAccess("node.builds.list"),
+      requireHostingerApiAccess("database.list"),
     ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
     expect(dependencies.writeAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -54,19 +54,19 @@ describe("build API access boundary", () => {
     );
   });
 
-  it("denies an inactive user before membership resolution", async () => {
+  it("denies an inactive or banned user before database membership resolution", async () => {
     dependencies.getCurrentDashboardAccess.mockResolvedValue({
       status: "inactive_user",
     });
     await expect(
-      requireHostingerApiAccess("node.build.logs"),
+      requireHostingerApiAccess("database.password.change"),
     ).rejects.toMatchObject({ code: "FORBIDDEN", status: 403 });
     expect(dependencies.writeAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
         actorUserId: undefined,
         operation: "hostinger_access_denied",
         metadata: {
-          capability: "node.build.logs",
+          capability: "database.password.change",
           reason: "inactive_user",
         },
       }),

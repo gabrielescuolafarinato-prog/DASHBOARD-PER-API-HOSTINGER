@@ -23,6 +23,9 @@ export type MigrationCheckResult = {
   buildStatePresent: boolean;
   hostingerOperationsPresent: boolean;
   hostingerOperationStatusPresent: boolean;
+  siteDatabasesPresent: boolean;
+  hostingerOperationResourceKeyPresent: boolean;
+  hostingerOperationScopeIndexesPresent: boolean;
 };
 
 export interface MigrationCheckDependencies {
@@ -81,19 +84,37 @@ export async function runMigrationCheck(options?: {
         build_state: string | null;
         hostinger_operations: string | null;
         hostinger_operation_status: string | null;
+        site_databases: string | null;
+        hostinger_operations_unscoped_index: string | null;
+        hostinger_operations_resource_index: string | null;
+        hostinger_operation_resource_key: boolean;
       }>(
         `SELECT
           to_regclass($1)::text AS migration_table,
           to_regclass($2)::text AS site_builds,
           to_regtype($3)::text AS build_state,
           to_regclass($4)::text AS hostinger_operations,
-          to_regtype($5)::text AS hostinger_operation_status`,
+          to_regtype($5)::text AS hostinger_operation_status,
+          to_regclass($6)::text AS site_databases,
+          to_regclass($7)::text AS hostinger_operations_unscoped_index,
+          to_regclass($8)::text AS hostinger_operations_resource_index,
+          EXISTS (
+            SELECT 1
+            FROM pg_attribute
+            WHERE attrelid = to_regclass($4)
+              AND attname = $9
+              AND NOT attisdropped
+          ) AS hostinger_operation_resource_key`,
         [
           "drizzle.__drizzle_migrations",
           "public.site_builds",
           "public.build_state",
           "public.hostinger_operations",
           "public.hostinger_operation_status",
+          "public.site_databases",
+          "public.hostinger_operations_active_unscoped_unique",
+          "public.hostinger_operations_active_resource_unique",
+          "resource_key_hash",
         ],
       );
       const objects = objectResult.rows[0];
@@ -123,6 +144,14 @@ export async function runMigrationCheck(options?: {
         ),
         hostingerOperationStatusPresent: Boolean(
           objects?.hostinger_operation_status,
+        ),
+        siteDatabasesPresent: Boolean(objects?.site_databases),
+        hostingerOperationResourceKeyPresent: Boolean(
+          objects?.hostinger_operation_resource_key,
+        ),
+        hostingerOperationScopeIndexesPresent: Boolean(
+          objects?.hostinger_operations_unscoped_index &&
+            objects?.hostinger_operations_resource_index,
         ),
       };
     } catch (error) {
@@ -174,11 +203,29 @@ export async function runMigrationCheckCli(
         result.hostingerOperationStatusPresent ? "yes" : "no"
       }.`,
     );
+    dependencies.info(
+      `Required object public.site_databases present: ${
+        result.siteDatabasesPresent ? "yes" : "no"
+      }.`,
+    );
+    dependencies.info(
+      `Required column public.hostinger_operations.resource_key_hash present: ${
+        result.hostingerOperationResourceKeyPresent ? "yes" : "no"
+      }.`,
+    );
+    dependencies.info(
+      `Required Hostinger operation scope indexes present: ${
+        result.hostingerOperationScopeIndexesPresent ? "yes" : "no"
+      }.`,
+    );
     return result.migrationPending ||
       !result.siteBuildsPresent ||
       !result.buildStatePresent ||
       !result.hostingerOperationsPresent ||
-      !result.hostingerOperationStatusPresent
+      !result.hostingerOperationStatusPresent ||
+      !result.siteDatabasesPresent ||
+      !result.hostingerOperationResourceKeyPresent ||
+      !result.hostingerOperationScopeIndexesPresent
       ? 1
       : 0;
   } catch (error) {

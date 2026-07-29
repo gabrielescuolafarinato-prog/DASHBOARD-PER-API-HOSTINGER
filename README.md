@@ -1,6 +1,6 @@
 # Hostinger Single-Site Console
 
-Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, elenco build e log build read-only e riavvio controllato del server Node.js con policy capability default-deny.
+Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, build e log read-only, riavvio controllato del server Node.js e gestione dei database assegnati al dominio con policy capability default-deny.
 
 ## Stack e requisiti
 
@@ -182,6 +182,10 @@ Le migration correnti sono:
    mutazioni Hostinger, stato operazione, chiave idempotente hashata, reference
    ID, correlation ID sanificato e vincolo di una sola operazione attiva per
    sito e tipo.
+5. `0004_site_databases.sql`: binding non sensibili `site_databases`, vincoli
+   di ownership globale del nome database, metriche Hostinger verificate e
+   scope hashato per serializzare operazioni incompatibili sulla stessa
+   risorsa senza persisterne il nome nel registro operazioni.
 
 Drizzle registra le migration applicate in
 `drizzle.__drizzle_migrations`: rieseguire `npm run db:migrate` è idempotente e
@@ -202,8 +206,10 @@ $LASTEXITCODE
 Il check usa lo stesso parsing sicuro delle variabili del runner, verifica la
 connessione, confronta il numero di righe in
 `drizzle.__drizzle_migrations` con il journal locale e controlla
-`public.site_builds`, `public.build_state`, `public.hostinger_operations` e
-`public.hostinger_operation_status` esclusivamente tramite query `SELECT`.
+`public.site_builds`, `public.build_state`, `public.hostinger_operations`,
+`public.hostinger_operation_status`, `public.site_databases`, la colonna
+`hostinger_operations.resource_key_hash` e i relativi indici di scope
+esclusivamente tramite query `SELECT`.
 Stampa soltanto stato della connessione, conteggi, presenza di migration
 pendenti e presenza degli oggetti richiesti. Restituisce `0` soltanto quando lo
 schema locale atteso è completamente disponibile.
@@ -372,10 +378,14 @@ raggiungono mai il client, il database o l’audit.
 - Sito, username, dominio ed external ID vengono risolti dal server.
 - Capability non registrate vengono negate.
 - Non esiste un proxy Hostinger generico.
-- L’Overview mostra identità del sito, stato dell’infrastruttura e contatori
-  derivati dal registro capability. Build e log sono in sola lettura; il
-  restart Node.js è l’unica mutazione Hostinger implementata. Deploy, DNS,
-  database, cache e altre capability restano non implementati o negati.
+- L’Overview mostra esclusivamente identità e verifica del sito Hostinger,
+  Node.js, build, disponibilità restart, database assegnati, spazio e data
+  dell’ultima sincronizzazione. Neon, PostgreSQL, autenticazione, sessioni,
+  Vercel, URL della dashboard e contatori del registro capability non vengono
+  presentati come risorse del sito.
+- Build e log restano in sola lettura. Restart Node.js e operazioni database
+  esplicitamente registrate sono le mutazioni Hostinger implementate. Deploy,
+  DNS, cache e altre capability restano non implementati o negati.
 
 ## Build Node.js, log e restart controllato
 
@@ -430,6 +440,64 @@ La UI applica anche un lock sincrono al submit, mostra una conferma esplicita,
 pending, successo o errore con reference ID e mantiene il pulsante disabilitato
 durante il cooldown. Dopo il successo aggiorna Overview e build una sola volta,
 senza navigazioni o polling aggiuntivi.
+
+## Database Hostinger confinati al dominio
+
+La pagina `/databases` e gli endpoint applicativi `/api/databases/*`
+implementano la superficie documentata
+nell’[OpenAPI Hostinger ufficiale v1.22.0](https://github.com/hostinger/api/blob/main/openapi.json):
+
+- lista e creazione database account;
+- cambio password, repair asincrona ed eliminazione;
+- lista, aggiunta e rimozione delle connessioni remote;
+- generazione on-demand del link phpMyAdmin.
+
+Non esiste un proxy Hostinger generico. Ogni route ricalcola sessione, stato
+utente, membership e capability; le mutazioni verificano origin,
+`Sec-Fetch-Site`, body Zod stretto e `Idempotency-Key` UUID. ADMIN e MEMBER
+vedono la stessa pagina e possono eseguire le stesse operazioni site-scoped.
+
+Gli endpoint Hostinger database sono account-scoped, quindi il server applica
+un secondo confine:
+
+1. il dominio normalizzato del record `sites` viene sempre inviato come filtro
+   `domain` insieme a `is_assigned=true`;
+2. ogni record viene validato e post-filtrato nuovamente per uguaglianza esatta
+   del dominio normalizzato;
+3. record senza dominio, di altri domini, malformati o duplicati vengono
+   scartati e segnalati soltanto tramite contatori;
+4. tutte le pagine Hostinger vengono filtrate prima di calcolare totale e
+   paginazione applicativa, quindi nessun conteggio account-wide grezzo arriva
+   al browser;
+5. il browser riceve un UUID locale opaco; nome completo e username Hostinger
+   vengono risolti dal binding server-side;
+6. prima di ogni mutazione e prima di generare phpMyAdmin, il database viene
+   cercato nuovamente live con dominio e `is_assigned=true`.
+
+La creazione accetta dal browser soltanto suffisso nome, suffisso utente,
+password e conferma. Il server costruisce i nomi completi con lo username
+autorevole e imposta sempre `website_domain` al dominio configurato. Password,
+payload Hostinger, host, connection string, link phpMyAdmin e regole remote non
+vengono persistiti. La tabella `site_databases` contiene soltanto UUID locale,
+site ID, nome e utente database, dominio verificato, spazio, timestamp
+Hostinger, hash canonico del nome per il vincolo cross-site e timestamp di
+verifica.
+
+Il link phpMyAdmin viene richiesto solo al click, accettato soltanto con HTTPS
+e host sotto il confine esatto `.hostinger.com`, restituito con
+`Cache-Control: private, no-store`, aperto con `noopener,noreferrer` e mai
+inserito in database, log o audit. Le regole remote vengono incrociate con
+l’elenco live dei database autorizzati; sono ammesse nelle mutazioni soltanto
+IPv4 o IPv6 specifiche. `%`, wildcard, hostname e CIDR vengono rifiutati.
+
+Create, password, repair, delete e remote add/remove usano
+`hostinger_operations`. La chiave idempotente è hashata; un secondo hash opaco
+della risorsa alimenta advisory lock e indice univoco parziale, impedendo
+operazioni incompatibili concorrenti sullo stesso database anche quando il tipo
+operazione è diverso. Repair restituisce sempre “queued/accepted”: non dichiara
+completato il lavoro asincrono Hostinger. Delete richiede conferma esplicita,
+digitazione esatta del nome e rimuove il binding soltanto dopo la conferma
+Hostinger.
 
 ## GitHub Actions
 
@@ -497,8 +565,9 @@ Non è necessario `vercel.json`.
 
 ## Limitazioni note
 
-- Build e log sono esclusivamente read-only; deploy, cache, DNS, database,
-  vulnerabilità e altre mutazioni non sono implementate.
+- Build e log sono esclusivamente read-only; deploy, cache, DNS,
+  vulnerabilità e altre mutazioni non elencate nelle capability implementate
+  non sono disponibili.
 - Le operazioni account-wide o non associabili con certezza al sito
   configurato restano negate per tutti.
 - Email delivery e recupero password non sono configurati.
@@ -512,8 +581,9 @@ Non è necessario `vercel.json`.
 
 ## Prossima fase suggerita
 
-Validare build, log e restart con un account di staging controllato, osservando
-paginazione, stati attivi, `from_line`, cooldown, replay idempotente e rate
-limit reali. Progettare deploy da archivio, cache, DNS, database e ogni altra
-capability soltanto in fasi separate, mantenendo il confine single-site e il
-default-deny.
+Validare build, log, restart e database con un account di staging controllato,
+osservando paginazione, post-filtro del dominio, consistenza successiva alla
+creazione, repair asincrona, link phpMyAdmin, IPv4/IPv6, cooldown, replay
+idempotente e rate limit reali. Progettare deploy da archivio, cache, DNS e ogni
+altra capability soltanto in fasi separate, mantenendo il confine single-site e
+il default-deny.

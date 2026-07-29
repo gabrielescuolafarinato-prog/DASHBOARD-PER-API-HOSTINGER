@@ -24,8 +24,30 @@ describe("durable Hostinger operation claims", () => {
     expect(rendered.sql).toContain("INSERT INTO hostinger_operations");
     expect(rendered.sql).toContain("ON CONFLICT DO NOTHING");
     expect(rendered.sql).toContain("existing_operation");
-    expect(rendered.sql).toContain("recent_operation");
+    expect(rendered.sql).toContain("blocking_operation");
     expect(rendered.sql).not.toMatch(/token|payload|response|domain|username/i);
+  });
+
+  it("serializes incompatible operation types by the same opaque resource hash", () => {
+    const resourceKeyHash = "b".repeat(64);
+    const rendered = new PgDialect().sqlToQuery(
+      buildOperationClaimQuery({
+        siteId: "11111111-1111-4111-8111-111111111111",
+        actorUserId: "22222222-2222-4222-8222-222222222222",
+        operationType: "database.delete",
+        resourceKeyHash,
+        idempotencyKeyHash: "a".repeat(64),
+        referenceId: "abcdef123456",
+        cooldownSeconds: 0,
+      }),
+    );
+
+    expect(rendered.sql).toContain("operation.resource_key_hash");
+    expect(rendered.params).toContain(resourceKeyHash);
+    expect(rendered.sql).toContain(
+      "operation.status = 'IN_PROGRESS'::hostinger_operation_status",
+    );
+    expect(rendered.sql).not.toContain("database.delete:");
   });
 
   it.each([

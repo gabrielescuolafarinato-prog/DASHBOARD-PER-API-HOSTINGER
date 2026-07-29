@@ -5,6 +5,13 @@ export const hostingerSiteCapabilities = [
   "node.builds.list",
   "node.build.logs",
   "node.restart",
+  "database.list",
+  "database.create",
+  "database.password.change",
+  "database.repair",
+  "database.delete",
+  "database.phpmyadmin.link",
+  "database.remote.connections",
 ] as const;
 
 export type HostingerSiteCapability =

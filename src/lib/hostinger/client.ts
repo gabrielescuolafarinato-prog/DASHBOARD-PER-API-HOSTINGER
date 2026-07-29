@@ -67,6 +67,49 @@ export type NodeRestartResult = {
   correlationId?: string;
 };
 
+export type HostingerDatabaseSummary = {
+  name: string;
+  user: string;
+  domain: string;
+  diskUsageMb?: number;
+  maxSizeMb?: number;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type HostingerDatabasePage = {
+  databases: HostingerDatabaseSummary[];
+  pagination: NodeBuildPage["pagination"];
+  discarded: {
+    invalid: number;
+    missingDomain: number;
+    otherDomain: number;
+  };
+  correlationId?: string;
+};
+
+export type HostingerRemoteConnection = {
+  databaseName: string;
+  databaseUser: string;
+  ip: string;
+};
+
+export type HostingerRemoteConnectionList = {
+  connections: HostingerRemoteConnection[];
+  discardedInvalid: number;
+  correlationId?: string;
+};
+
+export type HostingerMutationResult = {
+  accepted: true;
+  correlationId?: string;
+};
+
+export type HostingerPhpMyAdminLink = {
+  link: string;
+  correlationId?: string;
+};
+
 type ClientOptions = {
   token: string;
   fetchImpl?: typeof fetch;
@@ -79,7 +122,7 @@ type HostingerResponse = {
   correlationId?: string;
 };
 
-type HostingerMethod = "GET" | "POST";
+type HostingerMethod = "GET" | "POST" | "PATCH" | "DELETE";
 
 const PAGINATION_DIGITS_PATTERN = /^\d+$/;
 const MAX_BUILD_PAGE = 10_000;
@@ -149,6 +192,61 @@ const hostingerEmptySuccessSchema = z
     message: z.string().max(500).optional(),
   })
   .passthrough();
+
+const hostingerIdentifierSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine(
+    (value) =>
+      value.trim() === value &&
+      !/[\u0000-\u001f\u007f]/.test(value),
+  );
+
+const hostingerDatabaseRecordSchema = z.object({
+  name: hostingerIdentifierSchema,
+  user: hostingerIdentifierSchema,
+  domain: z.unknown().optional(),
+  created_at: hostingerTimestampSchema.nullable().optional(),
+  updated_at: hostingerTimestampSchema.nullable().optional(),
+  disk_usage_mb: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(2_147_483_647)
+    .nullable()
+    .optional(),
+  max_size_mb: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(2_147_483_647)
+    .nullable()
+    .optional(),
+});
+
+const hostingerDatabasePageContainerSchema = z.object({
+  data: z.array(z.unknown()).max(MAX_BUILD_PAGE_SIZE),
+  meta: z.object({
+    current_page: strictPaginationInteger(1, MAX_BUILD_PAGE),
+    per_page: strictPaginationInteger(1, MAX_BUILD_PAGE_SIZE),
+    total: strictPaginationInteger(0, MAX_BUILD_TOTAL),
+  }),
+});
+
+const hostingerRemoteConnectionSchema = z.object({
+  database_name: hostingerIdentifierSchema,
+  database_user: hostingerIdentifierSchema,
+  ip: z.string().min(1).max(255),
+});
+
+const hostingerRemoteConnectionCollectionSchema = z
+  .array(z.unknown())
+  .max(10_000);
+
+const hostingerPhpMyAdminLinkSchema = z.object({
+  link: z.string().min(1).max(4_096),
+});
 
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
 
@@ -311,6 +409,7 @@ export class HostingerClient {
   private async request(
     method: HostingerMethod,
     path: string,
+    body?: Record<string, string>,
   ): Promise<HostingerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -322,6 +421,9 @@ export class HostingerClient {
           "Content-Type": "application/json",
           Authorization: `Bearer ${this.options.token}`,
         },
+        ...(body === undefined
+          ? {}
+          : { body: JSON.stringify(body) }),
         signal: controller.signal,
       });
       const text = await response.text();
@@ -526,6 +628,310 @@ export class HostingerClient {
       correlationId: response.correlationId,
     };
   }
+
+  async listDatabases(
+    configuredUsername: string,
+    configuredDomain: string,
+    pagination: { page: number; perPage: number; search?: string },
+  ): Promise<HostingerDatabasePage> {
+    const domain = normalizeDomain(configuredDomain);
+    const parameters = new URLSearchParams({
+      page: String(pagination.page),
+      per_page: String(pagination.perPage),
+      domain,
+      is_assigned: "true",
+    });
+    if (pagination.search) parameters.set("search", pagination.search);
+    const response = await this.request(
+      "GET",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/databases?${parameters.toString()}`,
+    );
+    const container = hostingerDatabasePageContainerSchema.safeParse(
+      response.payload,
+    );
+    if (!container.success) {
+      throw malformedResponse(response.correlationId);
+    }
+
+    const databases: HostingerDatabaseSummary[] = [];
+    const seen = new Set<string>();
+    const discarded = {
+      invalid: 0,
+      missingDomain: 0,
+      otherDomain: 0,
+    };
+    for (const candidate of container.data.data) {
+      const parsed = hostingerDatabaseRecordSchema.safeParse(candidate);
+      if (!parsed.success) {
+        discarded.invalid += 1;
+        continue;
+      }
+      const rawDomain = parsed.data.domain;
+      if (
+        rawDomain === null ||
+        rawDomain === undefined ||
+        rawDomain === ""
+      ) {
+        discarded.missingDomain += 1;
+        continue;
+      }
+      if (typeof rawDomain !== "string") {
+        discarded.invalid += 1;
+        continue;
+      }
+      let itemDomain: string;
+      try {
+        itemDomain = normalizeDomain(rawDomain);
+      } catch {
+        discarded.invalid += 1;
+        continue;
+      }
+      if (itemDomain !== domain) {
+        discarded.otherDomain += 1;
+        continue;
+      }
+      if (seen.has(parsed.data.name)) {
+        discarded.invalid += 1;
+        continue;
+      }
+      seen.add(parsed.data.name);
+      databases.push({
+        name: parsed.data.name,
+        user: parsed.data.user,
+        domain: itemDomain,
+        diskUsageMb: parsed.data.disk_usage_mb ?? undefined,
+        maxSizeMb: parsed.data.max_size_mb ?? undefined,
+        createdAt: parsed.data.created_at ?? undefined,
+        updatedAt: parsed.data.updated_at ?? undefined,
+      });
+    }
+
+    const {
+      current_page: page,
+      per_page: perPage,
+      total,
+    } = container.data.meta;
+    const totalPages = total === 0 ? 0 : Math.ceil(total / perPage);
+    return {
+      databases,
+      pagination: {
+        page,
+        perPage,
+        total,
+        totalPages,
+        hasPrevious: page > 1,
+        hasNext: page < totalPages,
+      },
+      discarded,
+      correlationId: response.correlationId,
+    };
+  }
+
+  async createDatabase(
+    configuredUsername: string,
+    input: {
+      name: string;
+      user: string;
+      password: string;
+      websiteDomain: string;
+    },
+  ): Promise<HostingerMutationResult> {
+    return await this.databaseMutation(
+      "POST",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/databases`,
+      {
+        name: input.name,
+        user: input.user,
+        password: input.password,
+        website_domain: normalizeDomain(input.websiteDomain),
+      },
+    );
+  }
+
+  async changeDatabasePassword(
+    configuredUsername: string,
+    databaseName: string,
+    password: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.databaseMutation(
+      "PATCH",
+      databasePath(
+        configuredUsername,
+        databaseName,
+        "/change-password",
+      ),
+      { password },
+    );
+  }
+
+  async deleteDatabase(
+    configuredUsername: string,
+    databaseName: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.databaseMutation(
+      "DELETE",
+      databasePath(configuredUsername, databaseName),
+    );
+  }
+
+  async repairDatabase(
+    configuredUsername: string,
+    databaseName: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.databaseMutation(
+      "PATCH",
+      databasePath(configuredUsername, databaseName, "/repair"),
+    );
+  }
+
+  async listDatabaseRemoteConnections(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<HostingerRemoteConnectionList> {
+    const domain = normalizeDomain(configuredDomain);
+    const parameters = new URLSearchParams({ domain });
+    const response = await this.request(
+      "GET",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/databases/remote-connections?${parameters.toString()}`,
+    );
+    const collection =
+      hostingerRemoteConnectionCollectionSchema.safeParse(
+        response.payload,
+      );
+    if (!collection.success) {
+      throw malformedResponse(response.correlationId);
+    }
+    const connections: HostingerRemoteConnection[] = [];
+    let discardedInvalid = 0;
+    for (const candidate of collection.data) {
+      const parsed =
+        hostingerRemoteConnectionSchema.safeParse(candidate);
+      if (!parsed.success) {
+        discardedInvalid += 1;
+        continue;
+      }
+      connections.push({
+        databaseName: parsed.data.database_name,
+        databaseUser: parsed.data.database_user,
+        ip: parsed.data.ip,
+      });
+    }
+    return {
+      connections,
+      discardedInvalid,
+      correlationId: response.correlationId,
+    };
+  }
+
+  async addDatabaseRemoteConnection(
+    configuredUsername: string,
+    databaseName: string,
+    ip: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.databaseMutation(
+      "POST",
+      databasePath(
+        configuredUsername,
+        databaseName,
+        "/remote-connections",
+      ),
+      { ip },
+    );
+  }
+
+  async removeDatabaseRemoteConnection(
+    configuredUsername: string,
+    databaseName: string,
+    ip: string,
+  ): Promise<HostingerMutationResult> {
+    const parameters = new URLSearchParams({ ip });
+    return await this.databaseMutation(
+      "DELETE",
+      `${databasePath(
+        configuredUsername,
+        databaseName,
+        "/remote-connections",
+      )}?${parameters.toString()}`,
+    );
+  }
+
+  async getDatabasePhpMyAdminLink(
+    configuredUsername: string,
+    databaseName: string,
+  ): Promise<HostingerPhpMyAdminLink> {
+    const response = await this.request(
+      "GET",
+      databasePath(
+        configuredUsername,
+        databaseName,
+        "/phpmyadmin-link",
+      ),
+    );
+    const parsed = hostingerPhpMyAdminLinkSchema.safeParse(
+      response.payload,
+    );
+    if (!parsed.success) throw malformedResponse(response.correlationId);
+    return {
+      link: validatePhpMyAdminLink(parsed.data.link),
+      correlationId: response.correlationId,
+    };
+  }
+
+  private async databaseMutation(
+    method: "POST" | "PATCH" | "DELETE",
+    path: string,
+    body?: Record<string, string>,
+  ): Promise<HostingerMutationResult> {
+    const response = await this.request(method, path, body);
+    if (
+      response.payload !== null &&
+      !hostingerEmptySuccessSchema.safeParse(response.payload).success
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+    return {
+      accepted: true,
+      correlationId: response.correlationId,
+    };
+  }
+}
+
+function databasePath(
+  configuredUsername: string,
+  databaseName: string,
+  suffix = "",
+) {
+  return `/api/hosting/v1/accounts/${encodeURIComponent(
+    configuredUsername,
+  )}/databases/${encodeURIComponent(databaseName)}${suffix}`;
+}
+
+export function validatePhpMyAdminLink(value: string) {
+  let link: URL;
+  try {
+    link = new URL(value);
+  } catch {
+    throw malformedResponse();
+  }
+  const hostname = link.hostname.toLowerCase();
+  if (
+    link.protocol !== "https:" ||
+    Boolean(link.username) ||
+    Boolean(link.password) ||
+    (link.port !== "" && link.port !== "443") ||
+    !hostname.endsWith(".hostinger.com") ||
+    hostname === "hostinger.com" ||
+    Boolean(link.hash)
+  ) {
+    throw malformedResponse();
+  }
+  return link.toString();
 }
 
 function normalizeBuildOrigin(

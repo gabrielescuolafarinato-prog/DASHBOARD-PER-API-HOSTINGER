@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Activity,
   Blocks,
+  Database,
   FileClock,
   Gauge,
   Settings2,
@@ -16,6 +17,7 @@ import { cn } from "@/lib/utils";
 const items = [
   { href: "/overview", label: "Overview", icon: Gauge },
   { href: "/builds", label: "Node.js builds", icon: Blocks },
+  { href: "/databases", label: "Databases", icon: Database },
   { href: "/team", label: "Team", icon: Users },
   { href: "/site-settings", label: "Site settings", icon: Settings2 },
   { href: "/capabilities", label: "Capabilities", icon: Activity },

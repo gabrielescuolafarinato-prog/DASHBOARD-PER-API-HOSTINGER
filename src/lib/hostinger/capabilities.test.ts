@@ -19,4 +19,19 @@ describe("Hostinger capability policy", () => {
     expect(getCapability("node.restart").state).toBe("IMPLEMENTED");
     expect(getCapability("node.deploy.archive").state).toBe("PLANNED");
   });
+
+  it.each([
+    "database.list",
+    "database.create",
+    "database.password.change",
+    "database.repair",
+    "database.delete",
+    "database.phpmyadmin.link",
+    "database.remote.connections",
+  ])("marks the completed database capability %s as implemented", (key) => {
+    expect(getCapability(key)).toMatchObject({
+      state: "IMPLEMENTED",
+      category: "SITE_RESOURCE",
+    });
+  });
 });

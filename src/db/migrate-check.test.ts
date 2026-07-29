@@ -23,13 +23,16 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies();
 
     await expect(check(fixture.dependencies)).resolves.toEqual({
-      expectedCount: 4,
-      appliedCount: 4,
+      expectedCount: 5,
+      appliedCount: 5,
       migrationPending: false,
       siteBuildsPresent: true,
       buildStatePresent: true,
       hostingerOperationsPresent: true,
       hostingerOperationStatusPresent: true,
+      siteDatabasesPresent: true,
+      hostingerOperationResourceKeyPresent: true,
+      hostingerOperationScopeIndexesPresent: true,
     });
     expect(fixture.end).toHaveBeenCalledOnce();
   });
@@ -38,7 +41,7 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies({ appliedCount: 2 });
 
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
-      expectedCount: 4,
+      expectedCount: 5,
       appliedCount: 2,
       migrationPending: true,
     });
@@ -48,7 +51,7 @@ describe("read-only migration status check", () => {
     const fixture = createDependencies({ migrationTablePresent: false });
 
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
-      expectedCount: 4,
+      expectedCount: 5,
       appliedCount: 0,
       migrationPending: true,
     });
@@ -67,6 +70,9 @@ describe("read-only migration status check", () => {
       buildStatePresent: true,
       hostingerOperationsPresent: true,
       hostingerOperationStatusPresent: true,
+      siteDatabasesPresent: true,
+      hostingerOperationResourceKeyPresent: true,
+      hostingerOperationScopeIndexesPresent: true,
     });
   });
 
@@ -78,6 +84,9 @@ describe("read-only migration status check", () => {
       buildStatePresent: false,
       hostingerOperationsPresent: true,
       hostingerOperationStatusPresent: true,
+      siteDatabasesPresent: true,
+      hostingerOperationResourceKeyPresent: true,
+      hostingerOperationScopeIndexesPresent: true,
     });
   });
 
@@ -90,6 +99,20 @@ describe("read-only migration status check", () => {
     await expect(check(fixture.dependencies)).resolves.toMatchObject({
       hostingerOperationsPresent: false,
       hostingerOperationStatusPresent: false,
+    });
+  });
+
+  it("reports migration 0004 objects as absent", async () => {
+    const fixture = createDependencies({
+      siteDatabasesPresent: false,
+      hostingerOperationResourceKeyPresent: false,
+      hostingerOperationScopeIndexesPresent: false,
+    });
+
+    await expect(check(fixture.dependencies)).resolves.toMatchObject({
+      siteDatabasesPresent: false,
+      hostingerOperationResourceKeyPresent: false,
+      hostingerOperationScopeIndexesPresent: false,
     });
   });
 
@@ -120,13 +143,16 @@ describe("read-only migration status check", () => {
 
     expect(fixture.info.mock.calls.flat()).toEqual([
       "Database connection: succeeded.",
-      "Expected migrations: 4.",
-      "Applied migrations: 4.",
+      "Expected migrations: 5.",
+      "Applied migrations: 5.",
       "Migration pending: no.",
       "Required object public.site_builds present: yes.",
       "Required object public.build_state present: yes.",
       "Required object public.hostinger_operations present: yes.",
       "Required object public.hostinger_operation_status present: yes.",
+      "Required object public.site_databases present: yes.",
+      "Required column public.hostinger_operations.resource_key_hash present: yes.",
+      "Required Hostinger operation scope indexes present: yes.",
     ]);
     const output = JSON.stringify([
       fixture.info.mock.calls,
@@ -152,6 +178,9 @@ function createDependencies(options?: {
   buildStatePresent?: boolean;
   hostingerOperationsPresent?: boolean;
   hostingerOperationStatusPresent?: boolean;
+  siteDatabasesPresent?: boolean;
+  hostingerOperationResourceKeyPresent?: boolean;
+  hostingerOperationScopeIndexesPresent?: boolean;
 }) {
   const query = vi.fn(async (statement: string) => {
     if (statement.includes("to_regclass")) {
@@ -178,13 +207,27 @@ function createDependencies(options?: {
               options?.hostingerOperationStatusPresent === false
                 ? null
                 : "public.hostinger_operation_status",
+            site_databases:
+              options?.siteDatabasesPresent === false
+                ? null
+                : "public.site_databases",
+            hostinger_operations_unscoped_index:
+              options?.hostingerOperationScopeIndexesPresent === false
+                ? null
+                : "public.hostinger_operations_active_unscoped_unique",
+            hostinger_operations_resource_index:
+              options?.hostingerOperationScopeIndexesPresent === false
+                ? null
+                : "public.hostinger_operations_active_resource_unique",
+            hostinger_operation_resource_key:
+              options?.hostingerOperationResourceKeyPresent !== false,
           },
         ],
       };
     }
     if (statement.includes("count(*)")) {
       return {
-        rows: [{ migration_count: options?.appliedCount ?? 4 }],
+        rows: [{ migration_count: options?.appliedCount ?? 5 }],
       };
     }
     return { rows: [{ value: 1 }] };
@@ -200,6 +243,7 @@ function createDependencies(options?: {
           { idx: 1 },
           { idx: 2 },
           { idx: 3 },
+          { idx: 4 },
         ],
       }),
     ),

@@ -1,5 +1,15 @@
 import "server-only";
-import { and, desc, eq, gte, lt, or, sql, type SQL } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  isNull,
+  lt,
+  or,
+  sql,
+  type SQL,
+} from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "@/db";
 import { hostingerOperations } from "@/db/schema";
@@ -31,6 +41,15 @@ export type HostingerOperationClaim =
     };
 
 export type OperationQueryExecutor = (query: SQL) => Promise<unknown>;
+export type HostingerOperationInput = {
+  siteId: string;
+  actorUserId: string;
+  operationType: string;
+  resourceKeyHash?: string;
+  idempotencyKeyHash: string;
+  referenceId: string;
+  cooldownSeconds?: number;
+};
 type OperationConflictLookup = (
   input: Parameters<typeof buildOperationClaimQuery>[0],
 ) => Promise<Exclude<HostingerOperationClaim, { kind: "claimed" }>>;
@@ -62,13 +81,7 @@ const claimRowSchema = z
   .strict();
 
 export async function claimHostingerOperation(
-  input: {
-    siteId: string;
-    actorUserId: string;
-    operationType: string;
-    idempotencyKeyHash: string;
-    referenceId: string;
-  },
+  input: HostingerOperationInput,
   dependencies: {
     execute?: OperationQueryExecutor;
     expireStale?: typeof expireStaleHostingerOperation;
@@ -77,7 +90,11 @@ export async function claimHostingerOperation(
 ): Promise<HostingerOperationClaim> {
   const expireStale =
     dependencies.expireStale ?? expireStaleHostingerOperation;
-  await expireStale(input.siteId, input.operationType);
+  await expireStale(
+    input.siteId,
+    input.operationType,
+    input.resourceKeyHash,
+  );
   const execute = dependencies.execute ?? executeOperationQuery;
   let result: unknown;
   try {
@@ -100,21 +117,21 @@ export async function claimHostingerOperation(
   }
 }
 
-export function buildOperationClaimQuery(input: {
-  siteId: string;
-  actorUserId: string;
-  operationType: string;
-  idempotencyKeyHash: string;
-  referenceId: string;
-}) {
+export function buildOperationClaimQuery(input: HostingerOperationInput) {
+  const cooldownSeconds =
+    input.cooldownSeconds ??
+    (input.operationType === NODE_RESTART_OPERATION
+      ? NODE_RESTART_COOLDOWN_SECONDS
+      : 0);
   const cooldownCutoff = new Date(
-    Date.now() - NODE_RESTART_COOLDOWN_SECONDS * 1_000,
+    Date.now() - cooldownSeconds * 1_000,
   );
+  const lockScope = input.resourceKeyHash ?? input.operationType;
   return sql`
     WITH operation_lock AS MATERIALIZED (
       SELECT pg_advisory_xact_lock(
         hashtextextended(
-          ${input.siteId}::text || ':' || ${input.operationType}::text,
+          ${input.siteId}::text || ':' || ${lockScope}::text,
           918273645
         )
       ) AS locked
@@ -132,7 +149,7 @@ export function buildOperationClaimQuery(input: {
         AND operation.idempotency_key_hash = ${input.idempotencyKeyHash}
       LIMIT 1
     ),
-    recent_operation AS MATERIALIZED (
+    blocking_operation AS MATERIALIZED (
       SELECT
         operation.status,
         operation.reference_id,
@@ -141,10 +158,24 @@ export function buildOperationClaimQuery(input: {
       FROM hostinger_operations operation
       INNER JOIN operation_lock ON true
       WHERE operation.site_id = ${input.siteId}::uuid
-        AND operation.operation_type = ${input.operationType}
         AND (
-          operation.status = 'IN_PROGRESS'::hostinger_operation_status
-          OR operation.created_at >= ${cooldownCutoff}
+          (
+            ${input.resourceKeyHash ?? null}::text IS NOT NULL
+            AND operation.resource_key_hash = ${input.resourceKeyHash ?? null}
+            AND operation.status = 'IN_PROGRESS'::hostinger_operation_status
+          )
+          OR (
+            ${input.resourceKeyHash ?? null}::text IS NULL
+            AND operation.resource_key_hash IS NULL
+            AND operation.operation_type = ${input.operationType}
+            AND (
+              operation.status = 'IN_PROGRESS'::hostinger_operation_status
+              OR (
+                ${cooldownSeconds}::integer > 0
+                AND operation.created_at >= ${cooldownCutoff}
+              )
+            )
+          )
         )
       ORDER BY operation.created_at DESC
       LIMIT 1
@@ -154,6 +185,7 @@ export function buildOperationClaimQuery(input: {
         site_id,
         actor_user_id,
         operation_type,
+        resource_key_hash,
         idempotency_key_hash,
         status,
         reference_id,
@@ -164,6 +196,7 @@ export function buildOperationClaimQuery(input: {
         ${input.siteId}::uuid,
         ${input.actorUserId}::uuid,
         ${input.operationType},
+        ${input.resourceKeyHash ?? null},
         ${input.idempotencyKeyHash},
         'IN_PROGRESS'::hostinger_operation_status,
         ${input.referenceId},
@@ -171,7 +204,7 @@ export function buildOperationClaimQuery(input: {
         now()
       FROM operation_lock
       WHERE NOT EXISTS (SELECT 1 FROM existing_operation)
-        AND NOT EXISTS (SELECT 1 FROM recent_operation)
+        AND NOT EXISTS (SELECT 1 FROM blocking_operation)
       ON CONFLICT DO NOTHING
       RETURNING status, reference_id, correlation_id, created_at
     )
@@ -206,7 +239,7 @@ export function buildOperationClaimQuery(input: {
       reference_id,
       correlation_id,
       extract(epoch FROM created_at)::double precision AS created_at_epoch
-    FROM recent_operation
+    FROM blocking_operation
     WHERE NOT EXISTS (SELECT 1 FROM inserted_operation)
       AND NOT EXISTS (SELECT 1 FROM existing_operation)
     LIMIT 1
@@ -338,6 +371,7 @@ export async function getNodeRestartCooldownSeconds(siteId: string) {
 async function expireStaleHostingerOperation(
   siteId: string,
   operationType: string,
+  resourceKeyHash?: string,
 ) {
   const staleCutoff = new Date(
     Date.now() - HOSTINGER_OPERATION_STALE_SECONDS * 1_000,
@@ -353,7 +387,12 @@ async function expireStaleHostingerOperation(
       .where(
         and(
           eq(hostingerOperations.siteId, siteId),
-          eq(hostingerOperations.operationType, operationType),
+          resourceKeyHash
+            ? eq(hostingerOperations.resourceKeyHash, resourceKeyHash)
+            : and(
+                eq(hostingerOperations.operationType, operationType),
+                isNull(hostingerOperations.resourceKeyHash),
+              ),
           eq(hostingerOperations.status, "IN_PROGRESS"),
           lt(hostingerOperations.createdAt, staleCutoff),
         ),
@@ -366,8 +405,13 @@ async function expireStaleHostingerOperation(
 async function lookupOperationAfterConflict(
   input: Parameters<typeof buildOperationClaimQuery>[0],
 ): Promise<Exclude<HostingerOperationClaim, { kind: "claimed" }>> {
+  const cooldownSeconds =
+    input.cooldownSeconds ??
+    (input.operationType === NODE_RESTART_OPERATION
+      ? NODE_RESTART_COOLDOWN_SECONDS
+      : 0);
   const cooldownCutoff = new Date(
-    Date.now() - NODE_RESTART_COOLDOWN_SECONDS * 1_000,
+    Date.now() - cooldownSeconds * 1_000,
   );
   try {
     const [existing] = await getDb()
@@ -407,11 +451,33 @@ async function lookupOperationAfterConflict(
       .where(
         and(
           eq(hostingerOperations.siteId, input.siteId),
-          eq(hostingerOperations.operationType, input.operationType),
-          or(
-            eq(hostingerOperations.status, "IN_PROGRESS"),
-            gte(hostingerOperations.createdAt, cooldownCutoff),
-          ),
+          input.resourceKeyHash
+            ? and(
+                eq(
+                  hostingerOperations.resourceKeyHash,
+                  input.resourceKeyHash,
+                ),
+                eq(hostingerOperations.status, "IN_PROGRESS"),
+              )
+            : and(
+                eq(
+                  hostingerOperations.operationType,
+                  input.operationType,
+                ),
+                isNull(hostingerOperations.resourceKeyHash),
+                cooldownSeconds > 0
+                  ? or(
+                      eq(hostingerOperations.status, "IN_PROGRESS"),
+                      gte(
+                        hostingerOperations.createdAt,
+                        cooldownCutoff,
+                      ),
+                    )
+                  : eq(
+                      hostingerOperations.status,
+                      "IN_PROGRESS",
+                    ),
+              ),
         ),
       )
       .orderBy(desc(hostingerOperations.createdAt))

@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { AppError } from "@/lib/errors";
 
 const MAX_ERROR_CAUSE_DEPTH = 4;
-const MIGRATION_SQLSTATES = new Set(["42P01", "42704"]);
+const MIGRATION_SQLSTATES = new Set(["42P01", "42703", "42704"]);
 const SAFE_ERROR_TYPES = new Set([
   "DatabaseError",
   "DrizzleError",
@@ -23,7 +23,8 @@ export function operationMigrationRequiredError(error: unknown) {
     phase: "hostinger_operation",
     sqlstate: match.sqlstate,
     errorType: match.errorType,
-    expectedMigration: "0003",
+    expectedMigration:
+      match.sqlstate === "42703" ? "0004" : "0003",
     result: "failure",
   });
 
@@ -58,6 +59,13 @@ function findMigrationError(error: unknown) {
       continue;
     }
     if (
+      sqlstate === "42703" &&
+      typeof candidate.column === "string" &&
+      candidate.column !== "resource_key_hash"
+    ) {
+      continue;
+    }
+    if (
       sqlstate === "42704" &&
       typeof candidate.dataType === "string" &&
       candidate.dataType !== "hostinger_operation_status"
@@ -65,7 +73,7 @@ function findMigrationError(error: unknown) {
       continue;
     }
     return {
-      sqlstate: sqlstate as "42P01" | "42704",
+      sqlstate: sqlstate as "42P01" | "42703" | "42704",
       errorType: safeErrorType(candidate),
     };
   }

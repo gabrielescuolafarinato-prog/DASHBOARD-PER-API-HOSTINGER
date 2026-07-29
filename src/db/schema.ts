@@ -1,6 +1,8 @@
 import {
   boolean,
+  check,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -223,6 +225,63 @@ export const siteBuilds = pgTable(
   ],
 );
 
+export const siteDatabases = pgTable(
+  "site_databases",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    siteId: uuid("site_id")
+      .notNull()
+      .references(() => sites.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    nameKeyHash: text("name_key_hash").notNull(),
+    databaseUser: text("database_user").notNull(),
+    verifiedDomain: text("verified_domain").notNull(),
+    diskUsageMb: integer("disk_usage_mb"),
+    maxSizeMb: integer("max_size_mb"),
+    hostingerCreatedAt: timestamp("hostinger_created_at", {
+      withTimezone: true,
+    }),
+    hostingerUpdatedAt: timestamp("hostinger_updated_at", {
+      withTimezone: true,
+    }),
+    lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    uniqueIndex("site_databases_name_key_unique").on(table.nameKeyHash),
+    index("site_databases_site_verified_idx").on(
+      table.siteId,
+      table.lastVerifiedAt,
+    ),
+    check(
+      "site_databases_name_length_check",
+      sql`char_length(${table.name}) BETWEEN 1 AND 128`,
+    ),
+    check(
+      "site_databases_name_key_hash_check",
+      sql`${table.nameKeyHash} ~ '^[a-f0-9]{64}$'`,
+    ),
+    check(
+      "site_databases_user_length_check",
+      sql`char_length(${table.databaseUser}) BETWEEN 1 AND 128`,
+    ),
+    check(
+      "site_databases_domain_length_check",
+      sql`char_length(${table.verifiedDomain}) BETWEEN 1 AND 253`,
+    ),
+    check(
+      "site_databases_disk_usage_nonnegative_check",
+      sql`${table.diskUsageMb} IS NULL OR ${table.diskUsageMb} >= 0`,
+    ),
+    check(
+      "site_databases_max_size_nonnegative_check",
+      sql`${table.maxSizeMb} IS NULL OR ${table.maxSizeMb} >= 0`,
+    ),
+  ],
+);
+
 export const hostingerOperations = pgTable(
   "hostinger_operations",
   {
@@ -233,6 +292,7 @@ export const hostingerOperations = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "restrict" }),
     operationType: text("operation_type").notNull(),
+    resourceKeyHash: text("resource_key_hash"),
     idempotencyKeyHash: text("idempotency_key_hash").notNull(),
     status: hostingerOperationStatusEnum("status")
       .default("IN_PROGRESS")
@@ -260,9 +320,16 @@ export const hostingerOperations = pgTable(
     uniqueIndex("hostinger_operations_reference_unique").on(
       table.referenceId,
     ),
-    uniqueIndex("hostinger_operations_active_site_type_unique")
+    uniqueIndex("hostinger_operations_active_unscoped_unique")
       .on(table.siteId, table.operationType)
-      .where(sql`${table.status} = 'IN_PROGRESS'`),
+      .where(
+        sql`${table.status} = 'IN_PROGRESS' AND ${table.resourceKeyHash} IS NULL`,
+      ),
+    uniqueIndex("hostinger_operations_active_resource_unique")
+      .on(table.siteId, table.resourceKeyHash)
+      .where(
+        sql`${table.status} = 'IN_PROGRESS' AND ${table.resourceKeyHash} IS NOT NULL`,
+      ),
     index("hostinger_operations_site_created_idx").on(
       table.siteId,
       table.operationType,
@@ -303,6 +370,7 @@ export const schema = {
   siteMemberships,
   hostingerResourceBindings,
   siteBuilds,
+  siteDatabases,
   hostingerOperations,
   auditEvents,
 };

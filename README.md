@@ -445,7 +445,7 @@ senza navigazioni o polling aggiuntivi.
 
 La pagina `/databases` e gli endpoint applicativi `/api/databases/*`
 implementano la superficie documentata
-nell’[OpenAPI Hostinger ufficiale v1.22.0](https://github.com/hostinger/api/blob/main/openapi.json):
+nell’[OpenAPI Hostinger ufficiale v1.23.0](https://github.com/hostinger/api/blob/main/openapi.json):
 
 - lista e creazione database account;
 - cambio password, repair asincrona ed eliminazione;
@@ -460,19 +460,39 @@ vedono la stessa pagina e possono eseguire le stesse operazioni site-scoped.
 Gli endpoint Hostinger database sono account-scoped, quindi il server applica
 un secondo confine:
 
-1. il dominio normalizzato del record `sites` viene sempre inviato come filtro
-   `domain` insieme a `is_assigned=true`;
-2. ogni record viene validato e post-filtrato nuovamente per uguaglianza esatta
+1. il primo tentativo di lettura invia sempre il dominio normalizzato del
+   record `sites` come filtro `domain` insieme a `is_assigned=true`;
+2. soltanto se Hostinger rifiuta esattamente quel GET con `422`, il client
+   read-only ripete una sola volta la stessa pagina senza i due filtri;
+3. ogni record, incluso ogni risultato del fallback account-wide, viene
+   validato e post-filtrato nuovamente per uguaglianza esatta
    del dominio normalizzato;
-3. record senza dominio, di altri domini, malformati o duplicati vengono
+4. record senza dominio, di altri domini, malformati o duplicati vengono
    scartati e segnalati soltanto tramite contatori;
-4. tutte le pagine Hostinger vengono filtrate prima di calcolare totale e
+5. tutte le pagine Hostinger vengono filtrate prima di calcolare totale e
    paginazione applicativa, quindi nessun conteggio account-wide grezzo arriva
-   al browser;
-5. il browser riceve un UUID locale opaco; nome completo e username Hostinger
+   al browser; oltre il limite sicuro di 100 pagine la lettura fallisce chiusa
+   senza restituire risultati parziali;
+6. il browser riceve un UUID locale opaco; nome completo e username Hostinger
    vengono risolti dal binding server-side;
-6. prima di ogni mutazione e prima di generare phpMyAdmin, il database viene
-   cercato nuovamente live con dominio e `is_assigned=true`.
+7. prima di ogni mutazione e prima di generare phpMyAdmin, il database viene
+   cercato nuovamente live con dominio e `is_assigned=true`, senza fallback
+   account-wide.
+
+La lista delle connessioni remote applica la stessa singola compatibilità su
+`422`: prima prova con `domain`, poi eventualmente una sola volta senza filtro.
+Anche in questo caso il payload resta server-side e ogni regola deve
+corrispondere per `database_name + database_user` a un database già
+live-verificato per il sito. Le regole estranee, duplicate, wildcard o non
+supportate vengono scartate.
+
+I retry e i fallimenti delle letture producono
+`hostinger_database_request_diagnostic` con reference ID, fase statica,
+status, correlation ID sanificato e risultato. Payload, messaggi Hostinger,
+username, dominio, database, utenti, IP, URL, query, token e stack non vengono
+registrati. Se il fallback fallisce, lo stesso reference ID viene restituito
+alla UI. Status diversi da `422`, timeout, `5xx` e fallimenti di decoding non
+attivano fallback.
 
 La creazione accetta dal browser soltanto suffisso nome, suffisso utente,
 password e conferma. Il server costruisce i nomi completi con lo username

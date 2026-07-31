@@ -30,6 +30,8 @@ import {
   type HostingerSiteCapability,
 } from "./permissions";
 
+const MAX_DATABASE_SCAN_PAGES = 100;
+
 export const DATABASE_CREATE_OPERATION = "database.create";
 export const DATABASE_PASSWORD_OPERATION = "database.password.change";
 export const DATABASE_REPAIR_OPERATION = "database.repair";
@@ -944,11 +946,12 @@ async function listAllLiveDatabases(
       current.site.hostingerUsername,
       current.site.primaryDomain,
       { page, perPage: 100 },
+      { allowUnfilteredFallback: true },
     );
     pages.push(result);
     if (!result.pagination.hasNext) return pages;
     page += 1;
-  } while (page <= 100);
+  } while (page <= MAX_DATABASE_SCAN_PAGES);
   throw new AppError(
     "HOSTINGER_ERROR",
     "Hostinger returned an unsupported database result size.",

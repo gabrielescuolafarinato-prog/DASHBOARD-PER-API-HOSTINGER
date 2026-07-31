@@ -98,6 +98,33 @@ describe("/api/databases", () => {
     expect(response.headers.get("cache-control")).toContain("no-store");
   });
 
+  it("returns the safe diagnostic reference when a database read fails", async () => {
+    mocks.listDatabasesForSite.mockRejectedValueOnce(
+      new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger rejected the configured site request.",
+        422,
+        "corr-private",
+        "a1b2c3d4e5f6",
+      ),
+    );
+    const response = await GET(
+      new NextRequest(
+        "https://console.test/api/databases?page=1&per_page=25",
+      ),
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "HOSTINGER_ERROR",
+        message: "Hostinger rejected the configured site request.",
+        referenceId: "a1b2c3d4e5f6",
+      },
+    });
+  });
+
   it("checks origin before creating and passes no browser-controlled domain or account username", async () => {
     const request = createRequest();
     const response = await POST(request);

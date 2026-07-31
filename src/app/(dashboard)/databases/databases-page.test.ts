@@ -15,6 +15,9 @@ describe("database dashboard surface", () => {
     expect(manager).toContain("Loading databases");
     expect(manager).toContain("No databases assigned to this site");
     expect(manager).toContain("Reference:");
+    expect(manager).toContain(
+      "body.error.referenceId",
+    );
   });
 
   it("requires explicit dialogs and exact typed deletion", () => {

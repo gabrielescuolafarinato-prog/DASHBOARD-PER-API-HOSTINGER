@@ -3,6 +3,7 @@ import { z } from "zod";
 import { AppError } from "@/lib/errors";
 import { getHostingerEnv } from "@/lib/env";
 import { reportBuildResponseDiagnostic } from "./build-response-diagnostic";
+import { reportDatabaseRequestDiagnostic } from "./database-request-diagnostic";
 import { normalizeDomain } from "./domain";
 
 export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
@@ -633,14 +634,116 @@ export class HostingerClient {
     configuredUsername: string,
     configuredDomain: string,
     pagination: { page: number; perPage: number; search?: string },
+    options: { allowUnfilteredFallback?: boolean } = {},
   ): Promise<HostingerDatabasePage> {
     const domain = normalizeDomain(configuredDomain);
+    try {
+      return await this.listDatabasePage(
+        configuredUsername,
+        domain,
+        pagination,
+        true,
+      );
+    } catch (error) {
+      if (
+        !options.allowUnfilteredFallback ||
+        !isExactUnprocessableHostingerError(error)
+      ) {
+        if (options.allowUnfilteredFallback) {
+          const referenceId = reportDatabaseRequestDiagnostic({
+            phase: "database_list_filtered",
+            upstreamStatus: diagnosticStatus(error),
+            correlationId: diagnosticCorrelationId(error),
+            endpointKind: "database_list",
+            attempt: "filtered",
+            forbiddenValues: [
+              configuredUsername,
+              domain,
+              pagination.search,
+            ],
+            result: "failure",
+          });
+          throw controlledDatabaseReadError(error, referenceId);
+        }
+        throw error;
+      }
+
+      const referenceId = reportDatabaseRequestDiagnostic({
+        phase: "database_list_filtered",
+        upstreamStatus: 422,
+        correlationId: error.correlationId,
+        endpointKind: "database_list",
+        attempt: "filtered",
+        forbiddenValues: [
+          configuredUsername,
+          domain,
+          pagination.search,
+        ],
+        result: "retry",
+      });
+      try {
+        const fallback = await this.listDatabasePage(
+          configuredUsername,
+          domain,
+          pagination,
+          false,
+        );
+        reportDatabaseRequestDiagnostic({
+          referenceId,
+          phase: "database_list_fallback",
+          upstreamStatus: 200,
+          correlationId: fallback.correlationId,
+          endpointKind: "database_list",
+          attempt: "fallback",
+          forbiddenValues: [
+            configuredUsername,
+            domain,
+            pagination.search,
+            ...fallback.databases.flatMap((database) => [
+              database.name,
+              database.user,
+            ]),
+          ],
+          result: "success",
+        });
+        return fallback;
+      } catch (fallbackError) {
+        reportDatabaseRequestDiagnostic({
+          referenceId,
+          phase: "database_list_fallback",
+          upstreamStatus: diagnosticStatus(fallbackError),
+          correlationId: diagnosticCorrelationId(fallbackError),
+          endpointKind: "database_list",
+          attempt: "fallback",
+          forbiddenValues: [
+            configuredUsername,
+            domain,
+            pagination.search,
+          ],
+          result: "failure",
+        });
+        throw controlledDatabaseReadError(
+          fallbackError,
+          referenceId,
+        );
+      }
+    }
+  }
+
+  private async listDatabasePage(
+    configuredUsername: string,
+    domain: string,
+    pagination: { page: number; perPage: number; search?: string },
+    filtered: boolean,
+  ): Promise<HostingerDatabasePage> {
     const parameters = new URLSearchParams({
       page: String(pagination.page),
       per_page: String(pagination.perPage),
-      domain,
-      is_assigned: "true",
     });
+    if (filtered) {
+      parameters.set("domain", domain);
+      parameters.set("is_assigned", "true");
+    }
     if (pagination.search) parameters.set("search", pagination.search);
     const response = await this.request(
       "GET",
@@ -793,12 +896,89 @@ export class HostingerClient {
     configuredDomain: string,
   ): Promise<HostingerRemoteConnectionList> {
     const domain = normalizeDomain(configuredDomain);
-    const parameters = new URLSearchParams({ domain });
+    try {
+      return await this.listDatabaseRemoteConnectionAttempt(
+        configuredUsername,
+        domain,
+      );
+    } catch (error) {
+      if (!isExactUnprocessableHostingerError(error)) {
+        const referenceId = reportDatabaseRequestDiagnostic({
+          phase: "remote_list_filtered",
+          upstreamStatus: diagnosticStatus(error),
+          correlationId: diagnosticCorrelationId(error),
+          endpointKind: "remote_connection_list",
+          attempt: "filtered",
+          forbiddenValues: [configuredUsername, domain],
+          result: "failure",
+        });
+        throw controlledDatabaseReadError(error, referenceId);
+      }
+
+      const referenceId = reportDatabaseRequestDiagnostic({
+        phase: "remote_list_filtered",
+        upstreamStatus: 422,
+        correlationId: error.correlationId,
+        endpointKind: "remote_connection_list",
+        attempt: "filtered",
+        forbiddenValues: [configuredUsername, domain],
+        result: "retry",
+      });
+      try {
+        const fallback =
+          await this.listDatabaseRemoteConnectionAttempt(
+            configuredUsername,
+          );
+        reportDatabaseRequestDiagnostic({
+          referenceId,
+          phase: "remote_list_fallback",
+          upstreamStatus: 200,
+          correlationId: fallback.correlationId,
+          endpointKind: "remote_connection_list",
+          attempt: "fallback",
+          forbiddenValues: [
+            configuredUsername,
+            domain,
+            ...fallback.connections.flatMap((connection) => [
+              connection.databaseName,
+              connection.databaseUser,
+              connection.ip,
+            ]),
+          ],
+          result: "success",
+        });
+        return fallback;
+      } catch (fallbackError) {
+        reportDatabaseRequestDiagnostic({
+          referenceId,
+          phase: "remote_list_fallback",
+          upstreamStatus: diagnosticStatus(fallbackError),
+          correlationId: diagnosticCorrelationId(fallbackError),
+          endpointKind: "remote_connection_list",
+          attempt: "fallback",
+          forbiddenValues: [configuredUsername, domain],
+          result: "failure",
+        });
+        throw controlledDatabaseReadError(
+          fallbackError,
+          referenceId,
+        );
+      }
+    }
+  }
+
+  private async listDatabaseRemoteConnectionAttempt(
+    configuredUsername: string,
+    domain?: string,
+  ): Promise<HostingerRemoteConnectionList> {
+    const parameters = domain
+      ? `?${new URLSearchParams({ domain }).toString()}`
+      : "";
     const response = await this.request(
       "GET",
       `/api/hosting/v1/accounts/${encodeURIComponent(
         configuredUsername,
-      )}/databases/remote-connections?${parameters.toString()}`,
+      )}/databases/remote-connections${parameters}`,
     );
     const collection =
       hostingerRemoteConnectionCollectionSchema.safeParse(
@@ -910,6 +1090,47 @@ function databasePath(
   return `/api/hosting/v1/accounts/${encodeURIComponent(
     configuredUsername,
   )}/databases/${encodeURIComponent(databaseName)}${suffix}`;
+}
+
+function isExactUnprocessableHostingerError(
+  error: unknown,
+): error is AppError {
+  return (
+    error instanceof AppError &&
+    error.code === "HOSTINGER_ERROR" &&
+    error.status === 422
+  );
+}
+
+function diagnosticStatus(error: unknown) {
+  return error instanceof AppError ? error.status : 502;
+}
+
+function diagnosticCorrelationId(error: unknown) {
+  return error instanceof AppError ? error.correlationId : undefined;
+}
+
+function controlledDatabaseReadError(
+  error: unknown,
+  referenceId: string,
+) {
+  if (error instanceof AppError) {
+    return new AppError(
+      error.code,
+      error.message,
+      error.status,
+      error.correlationId,
+      referenceId,
+      error.retryAfterSeconds,
+    );
+  }
+  return new AppError(
+    "HOSTINGER_ERROR",
+    "Hostinger database data is temporarily unavailable.",
+    503,
+    undefined,
+    referenceId,
+  );
 }
 
 export function validatePhpMyAdminLink(value: string) {

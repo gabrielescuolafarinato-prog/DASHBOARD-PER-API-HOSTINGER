@@ -34,7 +34,9 @@ const binding: SiteDatabaseRecord = {
   lastVerifiedAt: now.toISOString(),
 };
 
-const audit = vi.fn(async () => undefined);
+const audit = vi.fn(async (event: unknown) => {
+  void event;
+});
 
 beforeEach(() => {
   audit.mockClear();
@@ -62,6 +64,7 @@ describe("site-confined database service", () => {
         "u123",
         "example.com",
         { page: 1, perPage: 100 },
+        { allowUnfilteredFallback: true },
       );
     },
   );
@@ -84,6 +87,100 @@ describe("site-confined database service", () => {
     expect(result.pagination.total).toBe(1);
     expect(result.pagination.totalPages).toBe(1);
     expect(result.discarded.otherDomain).toBe(2);
+  });
+
+  it("collects every authorized page and recalculates dashboard pagination", async () => {
+    const liveDatabases = [
+      liveDatabase,
+      {
+        ...liveDatabase,
+        name: "u123_reports",
+        user: "u123_reports_user",
+      },
+      {
+        ...liveDatabase,
+        name: "u123_archive",
+        user: "u123_archive_user",
+      },
+    ];
+    const bindings = liveDatabases.map((database, index) => ({
+      id: `44444444-4444-4444-8444-44444444444${index}`,
+      ...database,
+      lastVerifiedAt: now.toISOString(),
+    }));
+    const listDatabases = vi.fn(
+      async (
+        _username: string,
+        _domain: string,
+        pagination: { page: number },
+      ) => ({
+        ...page([liveDatabases[pagination.page - 1]]),
+        pagination: {
+          page: pagination.page,
+          perPage: 100,
+          total: 300,
+          totalPages: 3,
+          hasPrevious: pagination.page > 1,
+          hasNext: pagination.page < 3,
+        },
+      }),
+    );
+    const syncDatabases = vi.fn(async () => bindings);
+
+    const result = await listDatabasesForSite(
+      context("ADMIN"),
+      { page: 2, perPage: 2 },
+      {
+        client: { listDatabases } as never,
+        syncDatabases,
+        audit,
+      },
+    );
+
+    expect(listDatabases).toHaveBeenCalledTimes(3);
+    expect(listDatabases.mock.calls.map((call) => call[2].page)).toEqual([
+      1, 2, 3,
+    ]);
+    expect(syncDatabases).toHaveBeenCalledWith(siteId, liveDatabases);
+    expect(result.databases).toEqual([bindings[2]]);
+    expect(result.pagination).toEqual({
+      page: 2,
+      perPage: 2,
+      total: 3,
+      totalPages: 2,
+      hasPrevious: true,
+      hasNext: false,
+    });
+  });
+
+  it("fails closed instead of returning a partial result beyond the safe page limit", async () => {
+    const listDatabases = vi.fn(async () => ({
+      ...page([]),
+      pagination: {
+        page: 1,
+        perPage: 100,
+        total: 10_001,
+        totalPages: 101,
+        hasPrevious: false,
+        hasNext: true,
+      },
+    }));
+
+    await expect(
+      listDatabasesForSite(
+        context("ADMIN"),
+        { page: 1, perPage: 25 },
+        {
+          client: { listDatabases } as never,
+          syncDatabases: vi.fn(),
+          audit,
+        },
+      ),
+    ).rejects.toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 502,
+    });
+    expect(listDatabases).toHaveBeenCalledTimes(100);
   });
 
   it("sets account username, full names and website domain only on the server", async () => {
@@ -312,6 +409,52 @@ describe("site-confined database service", () => {
       discarded: { otherDatabase: 1, unsupported: 1 },
     });
     expect(JSON.stringify(result)).not.toMatch(/u123_foreign|%/);
+  });
+
+  it("distinguishes a database preflight failure from a remote endpoint failure", async () => {
+    const preflightClient = {
+      listDatabases: vi.fn(async () => {
+        throw new Error("preflight failed");
+      }),
+      listDatabaseRemoteConnections: vi.fn(),
+    };
+    await expect(
+      listRemoteConnectionsForSite(context("ADMIN"), {
+        client: preflightClient as never,
+        audit,
+      }),
+    ).rejects.toThrow("preflight failed");
+    expect(
+      preflightClient.listDatabaseRemoteConnections,
+    ).not.toHaveBeenCalled();
+    expect(audit.mock.calls.at(-1)?.[0]).toMatchObject({
+      operation: "hostinger_database_request_failed",
+      metadata: {
+        request: "database_remote_connection_preflight",
+      },
+    });
+
+    audit.mockClear();
+    const remoteClient = {
+      listDatabases: vi.fn(async () => page([liveDatabase])),
+      listDatabaseRemoteConnections: vi.fn(async () => {
+        throw new Error("remote endpoint failed");
+      }),
+    };
+    await expect(
+      listRemoteConnectionsForSite(context("ADMIN"), {
+        client: remoteClient as never,
+        syncDatabases: vi.fn(async () => [binding]),
+        audit,
+      }),
+    ).rejects.toThrow("remote endpoint failed");
+    expect(remoteClient.listDatabaseRemoteConnections).toHaveBeenCalledOnce();
+    expect(audit.mock.calls.at(-1)?.[0]).toMatchObject({
+      operation: "hostinger_database_request_failed",
+      metadata: {
+        request: "database_remote_connection_list",
+      },
+    });
   });
 
   it("blocks an incompatible concurrent mutation before live verification", async () => {

@@ -73,6 +73,303 @@ describe("Hostinger database client", () => {
     expect(JSON.stringify(result)).not.toMatch(
       /other\.example|u1_unassigned|private_host|must-not-escape|permissions/i,
     );
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("retries one filtered 422 without filters and keeps the authoritative username", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response(
+          422,
+          {
+            error: "domain has a Production-specific validation issue",
+            correlation_id: "corr-filtered",
+          },
+        ),
+      )
+      .mockResolvedValueOnce(
+        response(
+          200,
+          {
+            data: [
+              {
+                name: "u1_site",
+                user: "u1_app",
+                domain: "EXAMPLE.com.",
+              },
+              {
+                name: "u1_foreign",
+                user: "u1_foreign",
+                domain: "other.example",
+              },
+              {
+                name: "u1_unassigned",
+                user: "u1_none",
+                domain: null,
+              },
+            ],
+            meta: { current_page: 1, per_page: 100, total: 3 },
+          },
+          { "x-correlation-id": "corr-fallback" },
+        ),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    const result = await client.listDatabases(
+      "authoritative-user",
+      "example.com",
+      { page: 1, perPage: 100 },
+      { allowUnfilteredFallback: true },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "https://developers.hostinger.com/api/hosting/v1/accounts/authoritative-user/databases?page=1&per_page=100&domain=example.com&is_assigned=true",
+      "https://developers.hostinger.com/api/hosting/v1/accounts/authoritative-user/databases?page=1&per_page=100",
+    ]);
+    expect(result.databases).toEqual([
+      {
+        name: "u1_site",
+        user: "u1_app",
+        domain: "example.com",
+        diskUsageMb: undefined,
+        maxSizeMb: undefined,
+        createdAt: undefined,
+        updatedAt: undefined,
+      },
+    ]);
+    expect(result.discarded).toEqual({
+      invalid: 0,
+      missingDomain: 1,
+      otherDomain: 1,
+    });
+    expect(JSON.stringify(result)).not.toMatch(
+      /other\.example|u1_foreign|u1_unassigned/i,
+    );
+    expect(consoleError).toHaveBeenCalledTimes(2);
+    expect(consoleError.mock.calls[0][1]).toMatchObject({
+      phase: "database_list_filtered",
+      upstreamStatus: 422,
+      correlationId: "corr-filtered",
+      attempt: "filtered",
+      result: "retry",
+    });
+    expect(consoleError.mock.calls[1][1]).toMatchObject({
+      phase: "database_list_fallback",
+      upstreamStatus: 200,
+      correlationId: "corr-fallback",
+      attempt: "fallback",
+      result: "success",
+      referenceId: (
+        consoleError.mock.calls[0][1] as { referenceId: string }
+      ).referenceId,
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+      /Production-specific|private-server-token|example\.com|authoritative-user|u1_site/i,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("keeps search on the single unfiltered retry when explicitly requested", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response(422, { correlation_id: "corr-filtered" }),
+      )
+      .mockResolvedValueOnce(
+        response(200, {
+          data: [],
+          meta: { current_page: 3, per_page: 25, total: 0 },
+        }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await client.listDatabases(
+      "u1",
+      "example.com",
+      { page: 3, perPage: 25, search: "u1_shop" },
+      { allowUnfilteredFallback: true },
+    );
+
+    expect(fetchImpl.mock.calls[1][0]).toBe(
+      "https://developers.hostinger.com/api/hosting/v1/accounts/u1/databases?page=3&per_page=25&search=u1_shop",
+    );
+    consoleError.mockRestore();
+  });
+
+  it("performs the unfiltered fallback only once and returns its reference ID on failure", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response(422, { correlation_id: "corr-filtered" }),
+      )
+      .mockResolvedValueOnce(
+        response(422, { correlation_id: "corr-fallback" }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    let caught: unknown;
+    try {
+      await client.listDatabases(
+        "u1",
+        "example.com",
+        { page: 1, perPage: 100 },
+        { allowUnfilteredFallback: true },
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(caught).toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 422,
+      correlationId: "corr-fallback",
+      referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+    });
+    expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+      phase: "database_list_fallback",
+      upstreamStatus: 422,
+      result: "failure",
+      referenceId: (caught as { referenceId: string }).referenceId,
+    });
+    consoleError.mockRestore();
+  });
+
+  it.each([401, 403, 404, 429, 500])(
+    "does not fallback an HTTP %i database-list failure",
+    async (status) => {
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      const fetchImpl = vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          response(status, { correlation_id: "corr-no-retry" }),
+        );
+      const client = new HostingerClient({
+        token: "private-server-token",
+        fetchImpl,
+      });
+
+      await expect(
+        client.listDatabases(
+          "u1",
+          "example.com",
+          { page: 1, perPage: 100 },
+          { allowUnfilteredFallback: true },
+        ),
+      ).rejects.toMatchObject({
+        referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(consoleError).toHaveBeenCalledOnce();
+      expect(consoleError.mock.calls[0][1]).toMatchObject({
+        phase: "database_list_filtered",
+        attempt: "filtered",
+        result: "failure",
+      });
+      consoleError.mockRestore();
+    },
+  );
+
+  it("does not fallback a timeout or a successful response that fails decoding", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const timeoutFetch = vi.fn<typeof fetch>(
+      async (_input, init) =>
+        await new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    );
+    const timeoutClient = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl: timeoutFetch,
+      timeoutMs: 1,
+    });
+
+    await expect(
+      timeoutClient.listDatabases(
+        "u1",
+        "example.com",
+        { page: 1, perPage: 100 },
+        { allowUnfilteredFallback: true },
+      ),
+    ).rejects.toMatchObject({ status: 504 });
+    expect(timeoutFetch).toHaveBeenCalledOnce();
+
+    const decodeFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(response(200, { data: [], meta: null }));
+    const decodeClient = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl: decodeFetch,
+    });
+    await expect(
+      decodeClient.listDatabases(
+        "u1",
+        "example.com",
+        { page: 1, perPage: 100 },
+        { allowUnfilteredFallback: true },
+      ),
+    ).rejects.toMatchObject({ status: 502 });
+    expect(decodeFetch).toHaveBeenCalledOnce();
+    expect(
+      consoleError.mock.calls.filter(
+        (call) =>
+          (
+            call[1] as {
+              phase?: string;
+              result?: string;
+            }
+          ).phase === "database_list_filtered" &&
+          (call[1] as { result?: string }).result === "failure",
+      ),
+    ).toHaveLength(2);
+    consoleError.mockRestore();
+  });
+
+  it("does not enable an account-wide fallback unless the read caller explicitly opts in", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        response(422, { correlation_id: "corr-no-fallback" }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await expect(
+      client.listDatabases("u1", "example.com", {
+        page: 1,
+        perPage: 100,
+        search: "u1_shop",
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("uses the exact official create request shape without returning the password or raw payload", async () => {
@@ -185,6 +482,137 @@ describe("Hostinger database client", () => {
       correlationId: "corr-db",
     });
     expect(JSON.stringify(result)).not.toContain("must-not-escape");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("retries a remote-list 422 once without domain", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response(422, {
+          error: "private validation body",
+          correlation_id: "corr-remote-filtered",
+        }),
+      )
+      .mockResolvedValueOnce(
+        response(
+          200,
+          [
+            {
+              database_name: "u1_shop",
+              database_user: "u1_app",
+              ip: "192.0.2.10",
+              private: "must-not-escape",
+            },
+          ],
+          { "x-correlation-id": "corr-remote-fallback" },
+        ),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    const result = await client.listDatabaseRemoteConnections(
+      "authoritative-user",
+      "example.com",
+    );
+
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "https://developers.hostinger.com/api/hosting/v1/accounts/authoritative-user/databases/remote-connections?domain=example.com",
+      "https://developers.hostinger.com/api/hosting/v1/accounts/authoritative-user/databases/remote-connections",
+    ]);
+    expect(result.connections).toEqual([
+      {
+        databaseName: "u1_shop",
+        databaseUser: "u1_app",
+        ip: "192.0.2.10",
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("must-not-escape");
+    expect(consoleError.mock.calls[0][1]).toMatchObject({
+      phase: "remote_list_filtered",
+      result: "retry",
+    });
+    expect(consoleError.mock.calls[1][1]).toMatchObject({
+      phase: "remote_list_fallback",
+      result: "success",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+      /private validation body|authoritative-user|example\.com|u1_shop|192\.0\.2\.10/i,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("returns the same safe reference when the remote fallback fails", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        response(422, { correlation_id: "corr-remote-filtered" }),
+      )
+      .mockResolvedValueOnce(
+        response(503, { correlation_id: "corr-remote-fallback" }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    let caught: unknown;
+    try {
+      await client.listDatabaseRemoteConnections("u1", "example.com");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(caught).toMatchObject({
+      code: "HOSTINGER_ERROR",
+      status: 503,
+      referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+    });
+    expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+      phase: "remote_list_fallback",
+      result: "failure",
+      referenceId: (caught as { referenceId: string }).referenceId,
+    });
+    consoleError.mockRestore();
+  });
+
+  it("does not fallback a non-422 remote-list failure", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        response(429, { correlation_id: "corr-remote-rate" }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await expect(
+      client.listDatabaseRemoteConnections("u1", "example.com"),
+    ).rejects.toMatchObject({
+      code: "RATE_LIMITED",
+      status: 429,
+      referenceId: expect.stringMatching(/^[a-f0-9]{12}$/),
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(consoleError).toHaveBeenCalledOnce();
+    expect(consoleError.mock.calls[0][1]).toMatchObject({
+      phase: "remote_list_filtered",
+      result: "failure",
+    });
+    consoleError.mockRestore();
   });
 
   it("accepts only temporary HTTPS links on an allowlisted Hostinger host", async () => {

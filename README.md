@@ -383,9 +383,10 @@ raggiungono mai il client, il database o l’audit.
   dell’ultima sincronizzazione. Neon, PostgreSQL, autenticazione, sessioni,
   Vercel, URL della dashboard e contatori del registro capability non vengono
   presentati come risorse del sito.
-- Build e log restano in sola lettura. Restart Node.js e operazioni database
-  esplicitamente registrate sono le mutazioni Hostinger implementate. Deploy,
-  DNS, cache e altre capability restano non implementati o negati.
+- Build e log restano in sola lettura. Restart Node.js, operazioni database,
+  cache site-scoped e patch selettiva delle vulnerabilità tramite pull request
+  sono le mutazioni Hostinger implementate. Deploy da archivio, DNS e le altre
+  capability fuori scope restano non implementati o negati.
 
 ## Build Node.js, log e restart controllato
 
@@ -476,8 +477,12 @@ un secondo confine:
 6. il browser riceve un UUID locale opaco; nome completo e username Hostinger
    vengono risolti dal binding server-side;
 7. prima di ogni mutazione e prima di generare phpMyAdmin, il database viene
-   cercato nuovamente live con dominio e `is_assigned=true`, senza fallback
-   account-wide.
+   cercato nuovamente live con nome esatto, dominio e `is_assigned=true`; solo
+   sullo stesso `422` già gestito dalla lista viene effettuato un singolo GET
+   read-only senza `domain`/`is_assigned`, mantenendo `search`;
+8. la verifica autorizza l’operazione soltanto se nome database, utente
+   database e dominio normalizzato coincidono esattamente con binding locale e
+   sito autorevole. Il fallback non viene mai applicato alla mutazione.
 
 La lista delle connessioni remote applica la stessa singola compatibilità su
 `422`: prima prova con `domain`, poi eventualmente una sola volta senza filtro.
@@ -496,7 +501,10 @@ attivano fallback.
 
 La creazione accetta dal browser soltanto suffisso nome, suffisso utente,
 password e conferma. Il server costruisce i nomi completi con lo username
-autorevole e imposta sempre `website_domain` al dominio configurato. Password,
+autorevole e imposta sempre `website_domain` al dominio configurato. Dopo la
+risposta positiva esegue tre letture brevi e limitate per la consistenza
+eventuale: se il record non è ancora visibile, la UI dichiara soltanto
+“creation accepted”, senza fingere una sincronizzazione completata. Password,
 payload Hostinger, host, connection string, link phpMyAdmin e regole remote non
 vengono persistiti. La tabella `site_databases` contiene soltanto UUID locale,
 site ID, nome e utente database, dominio verificato, spazio, timestamp
@@ -517,7 +525,63 @@ operazioni incompatibili concorrenti sullo stesso database anche quando il tipo
 operazione è diverso. Repair restituisce sempre “queued/accepted”: non dichiara
 completato il lavoro asincrono Hostinger. Delete richiede conferma esplicita,
 digitazione esatta del nome e rimuove il binding soltanto dopo la conferma
-Hostinger.
+Hostinger o una post-condizione read-only autorevole che dimostri l’assenza
+dopo un timeout/404 ambiguo. La rimozione remote richiede inoltre che la regola
+IP sia ancora presente nella lista live autorizzata.
+
+## Cache Hostinger site-scoped
+
+La pagina `/site-tools` espone tre sole funzioni documentate in OpenAPI 1.23.0:
+
+- `DELETE .../cache/clear`, senza directory controllabile dal browser;
+- `PATCH .../cache/toggle` con il solo body `{ "enabled": boolean }`;
+- `PATCH .../cacheless-mode/toggle` con lo stesso body stretto.
+
+Username e dominio provengono sempre dal record `sites`. Ogni route verifica
+Origin/CSRF, sessione, utente attivo, membership e capability, quindi richiede
+conferma e `Idempotency-Key` UUID. Tutte le operazioni cache condividono lo
+stesso hash risorsa in `hostinger_operations`: advisory lock e indice parziale
+le serializzano anche quando hanno operation type differenti. Un cooldown
+durevole di 15 secondi impedisce richieste ravvicinate; il lock UI è soltanto
+una protezione aggiuntiva.
+
+L’API pubblica non espone qui un GET autorevole dello stato cache. La UI usa
+quindi azioni esplicite Enable/Disable, non switch, e mostra esclusivamente
+l’ultima richiesta registrata dalla dashboard con questa etichetta. Non viene
+presentata come stato corrente Hostinger. Clear cache avvisa anche della
+possibile purge CDN; disabilitazione e cacheless mode espongono i rispettivi
+impatti e finalità temporanea.
+
+## Vulnerabilità Node.js e patch tramite pull request
+
+La pagina `/vulnerabilities` usa gli endpoint specifici:
+
+- `GET .../nodejs/vulnerabilities`, con filtro OpenAPI `severities` costruito
+  server-side dai valori `low`, `moderate`, `high`, `critical`, `unknown`;
+- `POST .../nodejs/vulnerabilities/patch` con il solo body
+  `{ "vulnerability_ids": [...] }`.
+
+Il client valida e riduce la lista a ID, package, versione installata, severity,
+CVSS/CVE opzionali, dipendenza diretta/transitiva, patchability, fix version,
+stato patch in corso, data e advisory URL HTTPS. Payload grezzi, descrizioni
+non usate e campi aggiuntivi non raggiungono il browser.
+
+La selezione UI abilita soltanto elementi patchable non già in patching. Prima
+del POST il backend ricarica comunque l’intera lista live e rifiuta ID assenti,
+non patchable o già inclusi in una patch. Una sola patch può essere attiva per
+sito; idempotenza e concorrenza sono durevoli in `hostinger_operations` e non
+esistono retry automatici della mutazione.
+
+La risposta 201 viene ridotta agli ID effettivamente inclusi, numero PR,
+branch sanificato e link PR HTTPS con host GitHub e path `/pull/{numero}`
+allowlisted. Branch e URL non vengono auditati. La UI dichiara soltanto che
+Hostinger ha aperto una pull request da revisionare e unire; non dichiara le
+vulnerabilità risolte. I casi archive/non disponibile (404), GitHub App senza
+write access (403), selezione non patchable o PR già aperta (422), rate limit e
+timeout producono messaggi controllati con reference ID.
+
+Cache e vulnerabilità riusano integralmente `hostinger_operations`; non è
+necessaria una migration `0005`.
 
 ## GitHub Actions
 
@@ -585,9 +649,9 @@ Non è necessario `vercel.json`.
 
 ## Limitazioni note
 
-- Build e log sono esclusivamente read-only; deploy, cache, DNS,
-  vulnerabilità e altre mutazioni non elencate nelle capability implementate
-  non sono disponibili.
+- Build e log sono esclusivamente read-only; deploy da archivio, DNS,
+  registrar, sottodomini, alias, cron e altre mutazioni non elencate nelle
+  capability implementate non sono disponibili.
 - Le operazioni account-wide o non associabili con certezza al sito
   configurato restano negate per tutti.
 - Email delivery e recupero password non sono configurati.
@@ -601,9 +665,9 @@ Non è necessario `vercel.json`.
 
 ## Prossima fase suggerita
 
-Validare build, log, restart e database con un account di staging controllato,
-osservando paginazione, post-filtro del dominio, consistenza successiva alla
-creazione, repair asincrona, link phpMyAdmin, IPv4/IPv6, cooldown, replay
-idempotente e rate limit reali. Progettare deploy da archivio, cache, DNS e ogni
-altra capability soltanto in fasi separate, mantenendo il confine single-site e
-il default-deny.
+Validare build, log, restart, database, cache e vulnerabilità con un account di
+staging controllato, osservando paginazione, post-filtro del dominio,
+consistenza successiva alla creazione, repair asincrona, link phpMyAdmin,
+IPv4/IPv6, cooldown, replay idempotente, disponibilità GitHub e rate limit
+reali. Progettare deploy da archivio, DNS e ogni altra capability soltanto in
+fasi separate, mantenendo il confine single-site e il default-deny.

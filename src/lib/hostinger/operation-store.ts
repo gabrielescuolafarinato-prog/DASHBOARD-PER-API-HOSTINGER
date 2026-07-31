@@ -162,7 +162,13 @@ export function buildOperationClaimQuery(input: HostingerOperationInput) {
           (
             ${input.resourceKeyHash ?? null}::text IS NOT NULL
             AND operation.resource_key_hash = ${input.resourceKeyHash ?? null}
-            AND operation.status = 'IN_PROGRESS'::hostinger_operation_status
+            AND (
+              operation.status = 'IN_PROGRESS'::hostinger_operation_status
+              OR (
+                ${cooldownSeconds}::integer > 0
+                AND operation.created_at >= ${cooldownCutoff}
+              )
+            )
           )
           OR (
             ${input.resourceKeyHash ?? null}::text IS NULL
@@ -319,6 +325,39 @@ export async function finishHostingerOperation(
   }
 }
 
+export async function getHostingerOperationByIdempotency(
+  siteId: string,
+  operationType: string,
+  idempotencyKeyHash: string,
+): Promise<HostingerOperationRecord | undefined> {
+  try {
+    const [operation] = await getDb()
+      .select({
+        status: hostingerOperations.status,
+        referenceId: hostingerOperations.referenceId,
+        correlationId: hostingerOperations.correlationId,
+        createdAt: hostingerOperations.createdAt,
+      })
+      .from(hostingerOperations)
+      .where(
+        and(
+          eq(hostingerOperations.siteId, siteId),
+          eq(hostingerOperations.operationType, operationType),
+          eq(
+            hostingerOperations.idempotencyKeyHash,
+            idempotencyKeyHash,
+          ),
+        ),
+      )
+      .limit(1);
+    return operation
+      ? normalizeSelectedOperation(operation)
+      : undefined;
+  } catch (error) {
+    throw operationMigrationRequiredError(error) ?? error;
+  }
+}
+
 export async function getNodeRestartBlockedUntil(
   siteId: string,
 ): Promise<Date | undefined> {
@@ -457,7 +496,15 @@ async function lookupOperationAfterConflict(
                   hostingerOperations.resourceKeyHash,
                   input.resourceKeyHash,
                 ),
-                eq(hostingerOperations.status, "IN_PROGRESS"),
+                cooldownSeconds > 0
+                  ? or(
+                      eq(hostingerOperations.status, "IN_PROGRESS"),
+                      gte(
+                        hostingerOperations.createdAt,
+                        cooldownCutoff,
+                      ),
+                    )
+                  : eq(hostingerOperations.status, "IN_PROGRESS"),
               )
             : and(
                 eq(

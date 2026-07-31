@@ -635,12 +635,18 @@ describe("Hostinger database client", () => {
     expect(() =>
       validatePhpMyAdminLink("https://user:secret@db.hostinger.com/signon"),
     ).toThrow();
+    expect(() =>
+      validatePhpMyAdminLink(
+        "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
+      ),
+    ).toThrow();
   });
 
   it.each<[number, AppErrorCode, number]>([
     [401, "HOSTINGER_ERROR", 401],
     [403, "HOSTINGER_ERROR", 403],
     [404, "NOT_FOUND", 404],
+    [409, "CONFLICT", 409],
     [422, "HOSTINGER_ERROR", 422],
     [429, "RATE_LIMITED", 429],
     [500, "HOSTINGER_ERROR", 503],

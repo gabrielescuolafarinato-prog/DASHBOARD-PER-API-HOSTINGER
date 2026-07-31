@@ -1,0 +1,123 @@
+import "server-only";
+import { randomBytes } from "node:crypto";
+
+export const hostingerDiagnosticPhases = [
+  "database_create",
+  "database_change_password",
+  "database_repair",
+  "database_delete",
+  "database_phpmyadmin",
+  "database_remote_add",
+  "database_remote_remove",
+  "database_live_verification",
+  "cache_clear",
+  "cache_toggle",
+  "cacheless_toggle",
+  "vulnerability_list",
+  "vulnerability_patch",
+] as const;
+
+export type HostingerDiagnosticPhase =
+  (typeof hostingerDiagnosticPhases)[number];
+
+export type HostingerOperationDiagnostic = {
+  referenceId: string;
+  phase: HostingerDiagnosticPhase;
+  upstreamStatus: number;
+  correlationId?: string;
+  operationType: string;
+  idempotencyStatus:
+    | "not_applicable"
+    | "claimed"
+    | "duplicate"
+    | "blocked"
+    | "completed"
+    | "failed";
+  result: "success" | "failure" | "denied" | "accepted";
+  durationBucket: "<250ms" | "<1s" | "<3s" | "<10s" | ">=10s";
+};
+
+export function createDiagnosticReferenceId() {
+  return randomBytes(6).toString("hex");
+}
+
+export function reportHostingerOperationDiagnostic(input: {
+  referenceId?: string;
+  phase: HostingerDiagnosticPhase;
+  upstreamStatus?: number;
+  correlationId?: unknown;
+  operationType: string;
+  idempotencyStatus: HostingerOperationDiagnostic["idempotencyStatus"];
+  result: HostingerOperationDiagnostic["result"];
+  startedAt?: number;
+  forbiddenValues?: unknown[];
+}) {
+  const diagnostic: HostingerOperationDiagnostic = {
+    referenceId:
+      typeof input.referenceId === "string" &&
+      /^[a-f0-9]{12}$/.test(input.referenceId)
+        ? input.referenceId
+        : createDiagnosticReferenceId(),
+    phase: input.phase,
+    upstreamStatus: safeStatus(input.upstreamStatus),
+    operationType: safeOperationType(input.operationType),
+    idempotencyStatus: input.idempotencyStatus,
+    result: input.result,
+    durationBucket: durationBucket(input.startedAt),
+  };
+  const correlationId = sanitizeCorrelationId(
+    input.correlationId,
+    input.forbiddenValues,
+  );
+  if (correlationId) diagnostic.correlationId = correlationId;
+  console.error("hostinger_operation_diagnostic", diagnostic);
+  return diagnostic.referenceId;
+}
+
+function safeStatus(value?: number) {
+  return value !== undefined &&
+    Number.isInteger(value) &&
+    value >= 100 &&
+    value <= 599
+    ? value
+    : 502;
+}
+
+function safeOperationType(value: string) {
+  return /^[a-z][a-z0-9._-]{0,99}$/.test(value)
+    ? value
+    : "unknown";
+}
+
+function sanitizeCorrelationId(
+  value: unknown,
+  forbiddenValues?: unknown[],
+) {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9._:/-]{1,200}$/.test(value) ||
+    value.includes("://")
+  ) {
+    return undefined;
+  }
+  const normalized = value.toLowerCase();
+  const forbidden = (forbiddenValues ?? []).filter(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate.length > 0,
+  );
+  return forbidden.some((candidate) =>
+    normalized.includes(candidate.toLowerCase()),
+  )
+    ? undefined
+    : value;
+}
+
+function durationBucket(startedAt?: number) {
+  const elapsed =
+    startedAt === undefined ? 0 : Math.max(0, Date.now() - startedAt);
+  if (elapsed < 250) return "<250ms";
+  if (elapsed < 1_000) return "<1s";
+  if (elapsed < 3_000) return "<3s";
+  if (elapsed < 10_000) return "<10s";
+  return ">=10s";
+}

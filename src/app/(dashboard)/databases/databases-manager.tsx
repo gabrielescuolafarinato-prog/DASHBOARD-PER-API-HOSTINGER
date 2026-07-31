@@ -219,9 +219,15 @@ export function DatabasesManager({ domain }: { domain: string }) {
       const body = (await response.json()) as ApiResult<{
         accepted: true;
         queued?: true;
+        synchronized?: boolean;
+        reconciled?: boolean;
         referenceId: string;
         idempotencyStatus: "created" | "replayed";
       }>;
+      if (modal.type === "create" || modal.type === "password") {
+        setPassword("");
+        setPasswordConfirmation("");
+      }
       if (!response.ok || !body.ok) {
         const failure = body.ok ? undefined : body.error;
         setNotice({
@@ -232,8 +238,6 @@ export function DatabasesManager({ domain }: { domain: string }) {
         });
         return;
       }
-      setPassword("");
-      setPasswordConfirmation("");
       clearForm();
       idempotencyKey.current = undefined;
       setModal(undefined);
@@ -940,6 +944,8 @@ function successMessage(
   modal: Modal,
   result: {
     queued?: true;
+    synchronized?: boolean;
+    reconciled?: boolean;
     idempotencyStatus: "created" | "replayed";
   },
 ) {
@@ -951,6 +957,18 @@ function successMessage(
   }
   if (modal.type === "password") {
     return "Password changed. Update the application database configuration now.";
+  }
+  if (modal.type === "create") {
+    return result.synchronized
+      ? "Database created and reconciled with Hostinger."
+      : "Creation accepted. Hostinger has not exposed the new database to read-back yet.";
+  }
+  if (
+    (modal.type === "remote-add" ||
+      modal.type === "remote-remove") &&
+    result.reconciled === false
+  ) {
+    return "Hostinger accepted the remote-access change; read-back is still pending.";
   }
   return "Hostinger accepted the database operation.";
 }

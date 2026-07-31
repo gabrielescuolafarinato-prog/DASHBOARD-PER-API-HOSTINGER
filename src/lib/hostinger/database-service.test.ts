@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "@/lib/errors";
 import {
   addRemoteConnectionForSite,
   changeDatabasePasswordForSite,
@@ -6,6 +7,7 @@ import {
   deleteDatabaseForSite,
   listDatabasesForSite,
   listRemoteConnectionsForSite,
+  removeRemoteConnectionForSite,
   repairDatabaseForSite,
   type DatabaseAccessContext,
   type SiteDatabaseRecord,
@@ -231,10 +233,45 @@ describe("site-confined database service", () => {
           passwordConfirmation: password,
         },
         idempotencyKey,
-        { client: client as never, audit },
+        successfulMutationDependencies(client),
       ),
     ).rejects.toMatchObject({ code: "CONFLICT", status: 409 });
     expect(client.createDatabase).not.toHaveBeenCalled();
+  });
+
+  it("replays a completed create key before duplicate precheck or mutation", async () => {
+    const listDatabases = vi.fn();
+    const createDatabase = vi.fn();
+    await expect(
+      createDatabaseForSite(
+        context("MEMBER"),
+        {
+          nameSuffix: "shop",
+          userSuffix: "app",
+          password,
+          passwordConfirmation: password,
+        },
+        idempotencyKey,
+        successfulMutationDependencies(
+          { listDatabases, createDatabase },
+          {
+            claimOperation: vi.fn(async () => ({
+              kind: "duplicate" as const,
+              operation: {
+                status: "SUCCEEDED" as const,
+                referenceId: "abcdef123456",
+                createdAt: now,
+              },
+            })),
+          },
+        ),
+      ),
+    ).resolves.toMatchObject({
+      accepted: true,
+      idempotencyStatus: "replayed",
+    });
+    expect(listDatabases).not.toHaveBeenCalled();
+    expect(createDatabase).not.toHaveBeenCalled();
   });
 
   it("live-verifies the opaque binding before changing a password and never audits it", async () => {
@@ -267,9 +304,64 @@ describe("site-confined database service", () => {
       "u123",
       "example.com",
       { page: 1, perPage: 100, search: "u123_shop" },
+      { allowUnfilteredFallback: true },
     );
     expect(client.changeDatabasePassword).toHaveBeenCalledOnce();
     expect(JSON.stringify(audit.mock.calls)).not.toContain(password);
+  });
+
+  it.each([
+    { ...liveDatabase, user: "u123_other" },
+    { ...liveDatabase, domain: "other.example" },
+  ])(
+    "denies a live database whose user or domain differs from the binding",
+    async (mismatch) => {
+      const changeDatabasePassword = vi.fn();
+      await expect(
+        changeDatabasePasswordForSite(
+          context("ADMIN"),
+          databaseId,
+          {
+            password,
+            passwordConfirmation: password,
+            confirmed: true,
+          },
+          idempotencyKey,
+          successfulMutationDependencies({
+            listDatabases: vi.fn(async () => page([mismatch])),
+            changeDatabasePassword,
+          }),
+        ),
+      ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+      expect(changeDatabasePassword).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reports creation accepted when read-back remains eventually consistent", async () => {
+    const listDatabases = vi.fn(async () => page([]));
+    const createDatabase = vi.fn(async () => ({
+      accepted: true as const,
+    }));
+    const result = await createDatabaseForSite(
+      context("ADMIN"),
+      {
+        nameSuffix: "shop",
+        userSuffix: "app",
+        password,
+        passwordConfirmation: password,
+      },
+      idempotencyKey,
+      successfulMutationDependencies({
+        listDatabases,
+        createDatabase,
+      }),
+    );
+    expect(result).toMatchObject({
+      accepted: true,
+      synchronized: false,
+    });
+    expect(createDatabase).toHaveBeenCalledOnce();
+    expect(listDatabases).toHaveBeenCalledTimes(4);
   });
 
   it("replays one repair idempotently and sends only one Hostinger call", async () => {
@@ -366,6 +458,91 @@ describe("site-confined database service", () => {
     );
   });
 
+  it("uses an authoritative read post-condition after an ambiguous delete timeout", async () => {
+    const listDatabases = vi
+      .fn()
+      .mockResolvedValueOnce(page([liveDatabase]))
+      .mockResolvedValueOnce(page([]));
+    const deleteDatabase = vi.fn(async () => {
+      throw new AppError(
+        "HOSTINGER_ERROR",
+        "The Hostinger request timed out.",
+        504,
+      );
+    });
+    const dependencies = successfulMutationDependencies({
+      listDatabases,
+      deleteDatabase,
+    });
+    await expect(
+      deleteDatabaseForSite(
+        context("MEMBER"),
+        databaseId,
+        { confirmation: liveDatabase.name, confirmed: true },
+        idempotencyKey,
+        dependencies,
+      ),
+    ).resolves.toMatchObject({ accepted: true });
+    expect(dependencies.deleteBinding).toHaveBeenCalledWith(
+      siteId,
+      databaseId,
+    );
+  });
+
+  it("replays a completed delete after its local binding was removed", async () => {
+    const findDatabase = vi.fn();
+    const deleteDatabase = vi.fn();
+    await expect(
+      deleteDatabaseForSite(
+        context("MEMBER"),
+        databaseId,
+        { confirmation: liveDatabase.name, confirmed: true },
+        idempotencyKey,
+        {
+          ...successfulMutationDependencies({
+            listDatabases: vi.fn(),
+            deleteDatabase,
+          }),
+          findDatabase,
+          findOperation: vi.fn(async () => ({
+            status: "SUCCEEDED" as const,
+            referenceId: "abcdef123456",
+            createdAt: now,
+          })),
+        },
+      ),
+    ).resolves.toMatchObject({
+      accepted: true,
+      idempotencyStatus: "replayed",
+    });
+    expect(findDatabase).not.toHaveBeenCalled();
+    expect(deleteDatabase).not.toHaveBeenCalled();
+  });
+
+  it("does not remove a binding when an ambiguous delete still exists", async () => {
+    const deleteDatabase = vi.fn(async () => {
+      throw new AppError(
+        "HOSTINGER_ERROR",
+        "The Hostinger request timed out.",
+        504,
+      );
+    });
+    const dependencies = successfulMutationDependencies({
+      listDatabases: vi.fn(async () => page([liveDatabase])),
+      deleteDatabase,
+    });
+    await expect(
+      deleteDatabaseForSite(
+        context("ADMIN"),
+        databaseId,
+        { confirmation: liveDatabase.name, confirmed: true },
+        idempotencyKey,
+        dependencies,
+      ),
+    ).rejects.toMatchObject({ status: 504 });
+    expect(dependencies.deleteBinding).not.toHaveBeenCalled();
+  });
+
   it("discards foreign databases and unsupported wildcard remote rules", async () => {
     const client = {
       listDatabases: vi.fn(async () => page([liveDatabase])),
@@ -409,6 +586,67 @@ describe("site-confined database service", () => {
       discarded: { otherDatabase: 1, unsupported: 1 },
     });
     expect(JSON.stringify(result)).not.toMatch(/u123_foreign|%/);
+  });
+
+  it("removes only a currently displayed and authorized remote rule", async () => {
+    const removeDatabaseRemoteConnection = vi.fn(async () => ({
+      accepted: true as const,
+    }));
+    const listDatabaseRemoteConnections = vi
+      .fn()
+      .mockResolvedValueOnce({
+        connections: [
+          {
+            databaseName: liveDatabase.name,
+            databaseUser: liveDatabase.user,
+            ip: "2001:db8::1",
+          },
+        ],
+        discardedInvalid: 0,
+      })
+      .mockResolvedValueOnce({
+        connections: [],
+        discardedInvalid: 0,
+      });
+    await expect(
+      removeRemoteConnectionForSite(
+        context("MEMBER"),
+        databaseId,
+        { ip: "2001:db8::1", confirmed: true },
+        idempotencyKey,
+        successfulMutationDependencies({
+          listDatabases: vi.fn(async () => page([liveDatabase])),
+          listDatabaseRemoteConnections,
+          removeDatabaseRemoteConnection,
+        }),
+      ),
+    ).resolves.toMatchObject({ reconciled: true });
+    expect(removeDatabaseRemoteConnection).toHaveBeenCalledWith(
+      "u123",
+      liveDatabase.name,
+      "2001:db8::1",
+    );
+  });
+
+  it("denies removal of a remote rule absent from the fresh authorized list", async () => {
+    const removeDatabaseRemoteConnection = vi.fn();
+    await expect(
+      removeRemoteConnectionForSite(
+        context("ADMIN"),
+        databaseId,
+        { ip: "192.0.2.10", confirmed: true },
+        idempotencyKey,
+        successfulMutationDependencies({
+          listDatabases: vi.fn(async () => page([liveDatabase])),
+          listDatabaseRemoteConnections: vi.fn(async () => ({
+            connections: [],
+            discardedInvalid: 0,
+          })),
+          removeDatabaseRemoteConnection,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
+    expect(removeDatabaseRemoteConnection).not.toHaveBeenCalled();
   });
 
   it("distinguishes a database preflight failure from a remote endpoint failure", async () => {
@@ -542,8 +780,10 @@ function successfulMutationDependencies(
       },
     })),
     finishOperation: vi.fn(async () => true),
+    findOperation: vi.fn(async () => undefined),
     audit,
     createReferenceId: () => "abcdef123456",
+    sleep: vi.fn(async () => undefined),
     ...overrides,
   };
 }

@@ -34,4 +34,17 @@ describe("Hostinger capability policy", () => {
       category: "SITE_RESOURCE",
     });
   });
+
+  it.each([
+    "site.cache.clear",
+    "site.cache.toggle",
+    "site.cacheless.toggle",
+    "site.vulnerabilities.list",
+    "site.vulnerabilities.patch",
+  ])("marks the completed site capability %s as implemented", (key) => {
+    expect(getCapability(key)).toMatchObject({
+      state: "IMPLEMENTED",
+      category: "SITE_DIRECT",
+    });
+  });
 });

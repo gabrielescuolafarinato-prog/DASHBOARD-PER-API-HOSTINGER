@@ -5,6 +5,15 @@ import { getHostingerEnv } from "@/lib/env";
 import { reportBuildResponseDiagnostic } from "./build-response-diagnostic";
 import { reportDatabaseRequestDiagnostic } from "./database-request-diagnostic";
 import { normalizeDomain } from "./domain";
+import {
+  vulnerabilitySeverities,
+  type VulnerabilitySeverity,
+} from "./vulnerability-constants";
+
+export {
+  vulnerabilitySeverities,
+  type VulnerabilitySeverity,
+} from "./vulnerability-constants";
 
 export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
 
@@ -108,6 +117,35 @@ export type HostingerMutationResult = {
 
 export type HostingerPhpMyAdminLink = {
   link: string;
+  correlationId?: string;
+};
+
+export type HostingerVulnerability = {
+  id: string;
+  packageName: string;
+  installedVersion: string;
+  severity: VulnerabilitySeverity;
+  cvssScore?: number;
+  cve?: string;
+  isDirect: boolean;
+  isPatchable: boolean;
+  fixVersion?: string;
+  isPatchingInProgress: boolean;
+  publishedAt?: string;
+  advisoryUrl?: string;
+};
+
+export type HostingerVulnerabilityList = {
+  vulnerabilities: HostingerVulnerability[];
+  correlationId?: string;
+};
+
+export type HostingerVulnerabilityPatchResult = {
+  accepted: true;
+  patchedVulnerabilityIds: string[];
+  pullRequestUrl?: string;
+  pullRequestNumber?: number;
+  headBranch?: string;
   correlationId?: string;
 };
 
@@ -249,6 +287,95 @@ const hostingerPhpMyAdminLinkSchema = z.object({
   link: z.string().min(1).max(4_096),
 });
 
+const vulnerabilityIdSchema = z
+  .string()
+  .min(1)
+  .max(200)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+const packageNameSchema = z
+  .string()
+  .min(1)
+  .max(214)
+  .refine(
+    (value) =>
+      value.trim() === value &&
+      !/[\u0000-\u001f\u007f]/.test(value),
+  );
+const packageVersionSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .refine(
+    (value) =>
+      value.trim() === value &&
+      !/[\u0000-\u001f\u007f]/.test(value),
+  );
+const gitBranchSchema = z
+  .string()
+  .min(1)
+  .max(255)
+  .refine(
+    (value) =>
+      /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) &&
+      !value.includes("..") &&
+      !value.includes("//") &&
+      !value.includes("@{") &&
+      !value.endsWith("/") &&
+      !value.endsWith(".") &&
+      !value
+        .split("/")
+        .some(
+          (part) =>
+            part.length === 0 ||
+            part.startsWith(".") ||
+            part.endsWith(".lock"),
+        ),
+  );
+const cveSchema = z
+  .string()
+  .max(64)
+  .regex(/^CVE-\d{4}-\d{4,}$/i);
+const hostingerVulnerabilitySchema = z.object({
+  package_name: packageNameSchema,
+  installed_version: packageVersionSchema,
+  is_direct: z.boolean(),
+  is_patchable: z.boolean(),
+  fix_version: packageVersionSchema.nullable().optional(),
+  vulnerability_id: vulnerabilityIdSchema,
+  severity: z.enum(vulnerabilitySeverities),
+  cvss_score: z.number().min(0).max(10).nullable().optional(),
+  cve: cveSchema.nullable().optional(),
+  url: z.string().max(4_096).nullable().optional(),
+  published_at: hostingerTimestampSchema.nullable().optional(),
+  is_patching_in_progress: z.boolean(),
+});
+const hostingerVulnerabilityCollectionSchema = z
+  .array(hostingerVulnerabilitySchema)
+  .max(10_000)
+  .superRefine((items, context) => {
+    const seen = new Set<string>();
+    for (const [index, item] of items.entries()) {
+      if (seen.has(item.vulnerability_id)) {
+        context.addIssue({
+          code: "custom",
+          message: "Duplicate vulnerability identifier.",
+          path: [index, "vulnerability_id"],
+        });
+      }
+      seen.add(item.vulnerability_id);
+    }
+  });
+const hostingerPatchResultSchema = z.object({
+  pr_url: z.string().max(4_096).optional(),
+  pr_number: z.number().int().positive().max(2_147_483_647).optional(),
+  head_branch: gitBranchSchema.optional(),
+  patched_vulnerability_ids: z
+    .array(vulnerabilityIdSchema)
+    .min(1)
+    .max(1_000)
+    .refine((items) => new Set(items).size === items.length),
+});
+
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
 
 function sanitizeCorrelationId(value: unknown) {
@@ -296,6 +423,14 @@ function httpError(status: number, id?: string) {
       "NOT_FOUND",
       "The configured Hostinger site was not found.",
       404,
+      id,
+    );
+  }
+  if (status === 409) {
+    return new AppError(
+      "CONFLICT",
+      "Hostinger reports that another operation is already in progress.",
+      409,
       id,
     );
   }
@@ -410,7 +545,7 @@ export class HostingerClient {
   private async request(
     method: HostingerMethod,
     path: string,
-    body?: Record<string, string>,
+    body?: Record<string, unknown>,
   ): Promise<HostingerResponse> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -1063,12 +1198,169 @@ export class HostingerClient {
     };
   }
 
+  async clearWebsiteCache(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.siteMutation(
+      "DELETE",
+      configuredUsername,
+      configuredDomain,
+      "/cache/clear",
+    );
+  }
+
+  async toggleWebsiteCache(
+    configuredUsername: string,
+    configuredDomain: string,
+    enabled: boolean,
+  ): Promise<HostingerMutationResult> {
+    return await this.siteMutation(
+      "PATCH",
+      configuredUsername,
+      configuredDomain,
+      "/cache/toggle",
+      { enabled },
+    );
+  }
+
+  async toggleWebsiteCachelessMode(
+    configuredUsername: string,
+    configuredDomain: string,
+    enabled: boolean,
+  ): Promise<HostingerMutationResult> {
+    return await this.siteMutation(
+      "PATCH",
+      configuredUsername,
+      configuredDomain,
+      "/cacheless-mode/toggle",
+      { enabled },
+    );
+  }
+
+  async listNodeVulnerabilities(
+    configuredUsername: string,
+    configuredDomain: string,
+    severities: VulnerabilitySeverity[] = [],
+  ): Promise<HostingerVulnerabilityList> {
+    const domain = normalizeDomain(configuredDomain);
+    const parameters = new URLSearchParams();
+    for (const severity of severities) {
+      parameters.append("severities", severity);
+    }
+    const query = parameters.size > 0 ? `?${parameters.toString()}` : "";
+    const response = await this.request(
+      "GET",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(
+        domain,
+      )}/nodejs/vulnerabilities${query}`,
+    );
+    const parsed = hostingerVulnerabilityCollectionSchema.safeParse(
+      response.payload,
+    );
+    if (!parsed.success) throw malformedResponse(response.correlationId);
+    return {
+      vulnerabilities: parsed.data.map((item) => ({
+        id: item.vulnerability_id,
+        packageName: item.package_name,
+        installedVersion: item.installed_version,
+        severity: item.severity,
+        cvssScore: item.cvss_score ?? undefined,
+        cve: item.cve ?? undefined,
+        isDirect: item.is_direct,
+        isPatchable: item.is_patchable,
+        fixVersion: item.fix_version ?? undefined,
+        isPatchingInProgress: item.is_patching_in_progress,
+        publishedAt: item.published_at ?? undefined,
+        advisoryUrl: item.url
+          ? validateAdvisoryLink(item.url)
+          : undefined,
+      })),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async patchNodeVulnerabilities(
+    configuredUsername: string,
+    configuredDomain: string,
+    vulnerabilityIds: string[],
+  ): Promise<HostingerVulnerabilityPatchResult> {
+    const ids = z
+      .array(vulnerabilityIdSchema)
+      .min(1)
+      .max(1_000)
+      .parse(vulnerabilityIds);
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "POST",
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(
+        domain,
+      )}/nodejs/vulnerabilities/patch`,
+      { vulnerability_ids: ids },
+    );
+    const parsed = hostingerPatchResultSchema.safeParse(response.payload);
+    if (!parsed.success) throw malformedResponse(response.correlationId);
+    const pullRequestUrl = parsed.data.pr_url
+      ? validateGithubPullRequestLink(parsed.data.pr_url)
+      : undefined;
+    if (
+      pullRequestUrl &&
+      parsed.data.pr_number !== undefined &&
+      Number(
+        new URL(pullRequestUrl).pathname.match(
+          /\/pull\/(\d+)\/?$/,
+        )?.[1],
+      ) !== parsed.data.pr_number
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+    return {
+      accepted: true,
+      patchedVulnerabilityIds: parsed.data.patched_vulnerability_ids,
+      pullRequestUrl,
+      pullRequestNumber: parsed.data.pr_number,
+      headBranch: parsed.data.head_branch,
+      correlationId: response.correlationId,
+    };
+  }
+
   private async databaseMutation(
     method: "POST" | "PATCH" | "DELETE",
     path: string,
-    body?: Record<string, string>,
+    body?: Record<string, unknown>,
   ): Promise<HostingerMutationResult> {
     const response = await this.request(method, path, body);
+    if (
+      response.payload !== null &&
+      !hostingerEmptySuccessSchema.safeParse(response.payload).success
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+    return {
+      accepted: true,
+      correlationId: response.correlationId,
+    };
+  }
+
+  private async siteMutation(
+    method: "PATCH" | "DELETE",
+    configuredUsername: string,
+    configuredDomain: string,
+    suffix: string,
+    body?: Record<string, unknown>,
+  ): Promise<HostingerMutationResult> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      method,
+      `/api/hosting/v1/accounts/${encodeURIComponent(
+        configuredUsername,
+      )}/websites/${encodeURIComponent(domain)}${suffix}`,
+      body,
+    );
     if (
       response.payload !== null &&
       !hostingerEmptySuccessSchema.safeParse(response.payload).success
@@ -1148,6 +1440,51 @@ export function validatePhpMyAdminLink(value: string) {
     (link.port !== "" && link.port !== "443") ||
     !hostname.endsWith(".hostinger.com") ||
     hostname === "hostinger.com" ||
+    Boolean(link.hash) ||
+    [...link.searchParams.keys()].some((key) =>
+      /(?:^|[_-])(?:user(?:name)?|password|pass|pwd)(?:$|[_-])/i.test(
+        key,
+      ),
+    )
+  ) {
+    throw malformedResponse();
+  }
+  return link.toString();
+}
+
+export function validateAdvisoryLink(value: string) {
+  return validateExternalHttpsLink(value);
+}
+
+export function validateGithubPullRequestLink(value: string) {
+  const normalized = validateExternalHttpsLink(
+    value,
+    new Set(["github.com", "www.github.com"]),
+  );
+  const link = new URL(normalized);
+  if (!/^\/[^/]+\/[^/]+\/pull\/\d+\/?$/.test(link.pathname)) {
+    throw malformedResponse();
+  }
+  return link.toString();
+}
+
+function validateExternalHttpsLink(
+  value: string,
+  allowedHosts?: Set<string>,
+) {
+  let link: URL;
+  try {
+    link = new URL(value);
+  } catch {
+    throw malformedResponse();
+  }
+  if (
+    link.protocol !== "https:" ||
+    Boolean(link.username) ||
+    Boolean(link.password) ||
+    (link.port !== "" && link.port !== "443") ||
+    (allowedHosts !== undefined &&
+      !allowedHosts.has(link.hostname.toLowerCase())) ||
     Boolean(link.hash)
   ) {
     throw malformedResponse();

@@ -20,11 +20,18 @@ import type {
   RemoteConnectionInput,
 } from "./database-input";
 import { databaseMigrationRequiredError } from "./database-schema-diagnostic";
+import { normalizeDomain } from "./domain";
 import {
   claimHostingerOperation,
   finishHostingerOperation,
+  getHostingerOperationByIdempotency,
   type HostingerOperationClaim,
 } from "./operation-store";
+import {
+  createDiagnosticReferenceId,
+  reportHostingerOperationDiagnostic,
+  type HostingerDiagnosticPhase,
+} from "./operation-diagnostic";
 import {
   assertHostingerSiteAccess,
   type HostingerSiteCapability,
@@ -62,6 +69,8 @@ export type DatabaseMutationOutcome = {
   accepted: true;
   referenceId: string;
   idempotencyStatus: "created" | "replayed";
+  synchronized?: boolean;
+  reconciled?: boolean;
 };
 
 type DatabaseClient = Pick<
@@ -84,8 +93,10 @@ type DatabaseServiceDependencies = {
   deleteBinding?: typeof deleteSiteDatabaseBinding;
   claimOperation?: typeof claimHostingerOperation;
   finishOperation?: typeof finishHostingerOperation;
+  findOperation?: typeof getHostingerOperationByIdempotency;
   audit?: typeof writeAuditEvent;
   createReferenceId?: () => string;
+  sleep?: (milliseconds: number) => Promise<void>;
 };
 
 export async function listDatabasesForSite(
@@ -257,39 +268,9 @@ export async function createDatabaseForSite(
     input.userSuffix,
   );
   const client = dependencies.client ?? createHostingerClient();
-  let existing: HostingerDatabaseSummary | undefined;
-  try {
-    existing = await findLiveDatabaseByName(current, client, name);
-  } catch (error) {
-    await auditHostingerFailure(
-      dependencies.audit ?? writeAuditEvent,
-      current,
-      "database_create_preflight",
-      error,
-    );
-    throw error;
-  }
-  if (existing) {
-    await writeAuditSafely(dependencies.audit ?? writeAuditEvent, {
-      actorUserId: current.user.id,
-      siteId: current.site.siteId,
-      operation: "hostinger_database_create_duplicate",
-      targetType: "site_database",
-      targetIdentifier: resourceHash(name),
-      result: "DENIED",
-      metadata: {
-        capability: DATABASE_CREATE_OPERATION,
-        reason: "database_exists",
-      },
-    });
-    throw new AppError(
-      "CONFLICT",
-      "A database with this suffix already exists.",
-      409,
-    );
-  }
 
-  return await performDurableMutation(
+  let synchronized = false;
+  const outcome = await performDurableMutation(
     current,
     {
       capability: DATABASE_CREATE_OPERATION,
@@ -298,16 +279,57 @@ export async function createDatabaseForSite(
       resourceName: name,
       targetIdentifier: resourceHash(name),
       request: "database_create",
-      mutate: async () =>
-        await client.createDatabase(current.site.hostingerUsername, {
+      mutate: async () => {
+        const existing = await findLiveDatabaseByName(
+          current,
+          client,
+          name,
+        );
+        if (existing) {
+          await writeAuditSafely(
+            dependencies.audit ?? writeAuditEvent,
+            {
+              actorUserId: current.user.id,
+              siteId: current.site.siteId,
+              operation: "hostinger_database_create_duplicate",
+              targetType: "site_database",
+              targetIdentifier: resourceHash(name),
+              result: "DENIED",
+              metadata: {
+                capability: DATABASE_CREATE_OPERATION,
+                reason: "database_exists",
+              },
+            },
+          );
+          throw new AppError(
+            "CONFLICT",
+            "A database with this suffix already exists.",
+            409,
+          );
+        }
+        return await client.createDatabase(
+          current.site.hostingerUsername,
+          {
+            name,
+            user,
+            password: input.password,
+            websiteDomain: current.site.primaryDomain,
+          },
+        );
+      },
+      afterAccepted: async () => {
+        synchronized = await reconcileCreatedDatabase(
+          current,
+          client,
           name,
           user,
-          password: input.password,
-          websiteDomain: current.site.primaryDomain,
-        }),
+          dependencies,
+        );
+      },
     },
     dependencies,
   );
+  return { ...outcome, synchronized };
 }
 
 export async function changeDatabasePasswordForSite(
@@ -394,6 +416,59 @@ export async function deleteDatabaseForSite(
 ) {
   const capability = "database.delete" as const;
   assertHostingerSiteAccess(current.site.membershipRole, capability);
+  const idempotencyKeyHash = createHash("sha256")
+    .update(idempotencyKey.toLowerCase())
+    .digest("hex");
+  const previous = await (
+    dependencies.findOperation ??
+    getHostingerOperationByIdempotency
+  )(
+    current.site.siteId,
+    DATABASE_DELETE_OPERATION,
+    idempotencyKeyHash,
+  );
+  if (previous) {
+    await writeAuditSafely(dependencies.audit ?? writeAuditEvent, {
+      actorUserId: current.user.id,
+      siteId: current.site.siteId,
+      operation: "hostinger_database_operation_duplicate",
+      targetType: "site_database",
+      result:
+        previous.status === "SUCCEEDED" ? "SUCCESS" : "DENIED",
+      metadata: {
+        capability,
+        referenceId: previous.referenceId,
+        idempotencyStatus: previous.status,
+      },
+    });
+    reportHostingerOperationDiagnostic({
+      referenceId: previous.referenceId,
+      phase: "database_delete",
+      upstreamStatus:
+        previous.status === "SUCCEEDED" ? 200 : 409,
+      operationType: DATABASE_DELETE_OPERATION,
+      idempotencyStatus: "duplicate",
+      result:
+        previous.status === "SUCCEEDED" ? "success" : "denied",
+    });
+    if (previous.status === "SUCCEEDED") {
+      return {
+        accepted: true as const,
+        referenceId: previous.referenceId,
+        idempotencyStatus: "replayed" as const,
+      };
+    }
+    throw new AppError(
+      "CONFLICT",
+      previous.status === "IN_PROGRESS"
+        ? "This database deletion is already in progress."
+        : "This database deletion already failed and will not be sent again.",
+      409,
+      undefined,
+      previous.referenceId,
+      previous.status === "IN_PROGRESS" ? 5 : undefined,
+    );
+  }
   const binding = await requireBinding(
     current,
     databaseId,
@@ -419,10 +494,33 @@ export async function deleteDatabaseForSite(
       request: "database_delete",
       mutate: async () => {
         await verifyLiveBinding(current, binding, client, dependencies);
-        return await client.deleteDatabase(
-          current.site.hostingerUsername,
-          binding.name,
-        );
+        try {
+          return await client.deleteDatabase(
+            current.site.hostingerUsername,
+            binding.name,
+          );
+        } catch (error) {
+          if (!isAmbiguousDeleteError(error)) throw error;
+          try {
+            const remaining = await findLiveDatabaseByName(
+              current,
+              client,
+              binding.name,
+            );
+            if (!remaining) {
+              return {
+                accepted: true as const,
+                correlationId:
+                  error instanceof AppError
+                    ? error.correlationId
+                    : undefined,
+              };
+            }
+          } catch {
+            // Preserve the original ambiguous mutation error.
+          }
+          throw error;
+        }
       },
       afterAccepted: async () => {
         const remove =
@@ -448,6 +546,10 @@ export async function getPhpMyAdminLinkForSite(
     capability,
   );
   const client = dependencies.client ?? createHostingerClient();
+  const startedAt = Date.now();
+  const referenceId =
+    dependencies.createReferenceId?.() ??
+    createDiagnosticReferenceId();
   try {
     await verifyLiveBinding(current, binding, client, dependencies);
     const result = await client.getDatabasePhpMyAdminLink(
@@ -466,7 +568,24 @@ export async function getPhpMyAdminLinkForSite(
         correlationId: safeCorrelationId(result.correlationId, current),
       },
     });
-    return { link: result.link };
+    reportHostingerOperationDiagnostic({
+      referenceId,
+      phase: "database_phpmyadmin",
+      upstreamStatus: 200,
+      correlationId: result.correlationId,
+      operationType: "database.phpmyadmin.link",
+      idempotencyStatus: "not_applicable",
+      result: "success",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        binding.name,
+        binding.user,
+        result.link,
+      ],
+    });
+    return { link: result.link, referenceId };
   } catch (error) {
     await auditHostingerFailure(
       dependencies.audit ?? writeAuditEvent,
@@ -475,7 +594,44 @@ export async function getPhpMyAdminLinkForSite(
       error,
       binding.id,
     );
-    throw error;
+    const controlled =
+      error instanceof AppError
+        ? new AppError(
+            error.code,
+            error.message,
+            error.status,
+            safeCorrelationId(
+              error.correlationId,
+              current,
+              binding.name,
+            ),
+            referenceId,
+            error.retryAfterSeconds,
+          )
+        : new AppError(
+            "HOSTINGER_ERROR",
+            "The phpMyAdmin link could not be generated.",
+            503,
+            undefined,
+            referenceId,
+          );
+    reportHostingerOperationDiagnostic({
+      referenceId,
+      phase: "database_phpmyadmin",
+      upstreamStatus: controlled.status,
+      correlationId: controlled.correlationId,
+      operationType: "database.phpmyadmin.link",
+      idempotencyStatus: "not_applicable",
+      result: "failure",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        binding.name,
+        binding.user,
+      ],
+    });
+    throw controlled;
   }
 }
 
@@ -628,7 +784,8 @@ async function mutateRemoteConnection(
     capability,
   );
   const client = dependencies.client ?? createHostingerClient();
-  return await performDurableMutation(
+  let reconciled = false;
+  const outcome = await performDurableMutation(
     current,
     {
       capability,
@@ -645,6 +802,14 @@ async function mutateRemoteConnection(
           : "database_remote_connection_remove",
       mutate: async () => {
         await verifyLiveBinding(current, binding, client, dependencies);
+        if (action === "remove") {
+          await assertRemoteConnectionPresent(
+            current,
+            binding,
+            input.ip,
+            client,
+          );
+        }
         return action === "add"
           ? await client.addDatabaseRemoteConnection(
               current.site.hostingerUsername,
@@ -657,9 +822,19 @@ async function mutateRemoteConnection(
               input.ip,
             );
       },
+      afterAccepted: async () => {
+        reconciled = await reconcileRemoteConnection(
+          current,
+          binding,
+          input.ip,
+          action,
+          client,
+        );
+      },
     },
     dependencies,
   );
+  return { ...outcome, reconciled };
 }
 
 type DurableMutation = {
@@ -690,6 +865,7 @@ async function performDurableMutation(
   const finishOperation =
     dependencies.finishOperation ?? finishHostingerOperation;
   const audit = dependencies.audit ?? writeAuditEvent;
+  const startedAt = Date.now();
 
   const claim = await claimOperation({
     siteId: current.site.siteId,
@@ -701,6 +877,20 @@ async function performDurableMutation(
     cooldownSeconds: 0,
   });
   if (claim.kind !== "claimed") {
+    reportHostingerOperationDiagnostic({
+      referenceId: claim.operation.referenceId,
+      phase: diagnosticPhase(mutation.request),
+      upstreamStatus: 409,
+      operationType: mutation.operationType,
+      idempotencyStatus:
+        claim.kind === "duplicate" ? "duplicate" : "blocked",
+      result:
+        claim.kind === "duplicate" &&
+        claim.operation.status === "SUCCEEDED"
+          ? "success"
+          : "denied",
+      startedAt,
+    });
     return await handleUnclaimedDatabaseMutation(
       current,
       mutation,
@@ -747,6 +937,21 @@ async function performDurableMutation(
       controlled,
       claim.operation.referenceId,
     );
+    reportHostingerOperationDiagnostic({
+      referenceId: claim.operation.referenceId,
+      phase: diagnosticPhase(mutation.request),
+      upstreamStatus: controlled.status,
+      correlationId: controlled.correlationId,
+      operationType: mutation.operationType,
+      idempotencyStatus: "failed",
+      result: "failure",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        mutation.resourceName,
+      ],
+    });
     throw controlled;
   }
 
@@ -786,6 +991,21 @@ async function performDurableMutation(
       claim.operation.referenceId,
       "success_persistence",
     );
+    reportHostingerOperationDiagnostic({
+      referenceId: claim.operation.referenceId,
+      phase: diagnosticPhase(mutation.request),
+      upstreamStatus: 503,
+      correlationId,
+      operationType: mutation.operationType,
+      idempotencyStatus: "failed",
+      result: "failure",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        mutation.resourceName,
+      ],
+    });
     throw error;
   }
 
@@ -802,6 +1022,21 @@ async function performDurableMutation(
       correlationId,
       idempotencyStatus: "completed",
     },
+  });
+  reportHostingerOperationDiagnostic({
+    referenceId: claim.operation.referenceId,
+    phase: diagnosticPhase(mutation.request),
+    upstreamStatus: 200,
+    correlationId,
+    operationType: mutation.operationType,
+    idempotencyStatus: "completed",
+    result: "accepted",
+    startedAt,
+    forbiddenValues: [
+      current.site.hostingerUsername,
+      current.site.primaryDomain,
+      mutation.resourceName,
+    ],
   });
   return operationOutcome(claim, "created");
 }
@@ -889,8 +1124,39 @@ async function verifyLiveBinding(
   client: DatabaseClient,
   dependencies: DatabaseServiceDependencies,
 ) {
-  const live = await findLiveDatabaseByName(current, client, binding.name);
-  if (!live) {
+  const startedAt = Date.now();
+  const referenceId = createDiagnosticReferenceId();
+  let live: HostingerDatabaseSummary | undefined;
+  try {
+    live = await findLiveDatabaseByName(current, client, binding.name);
+  } catch (error) {
+    reportHostingerOperationDiagnostic({
+      referenceId,
+      phase: "database_live_verification",
+      upstreamStatus:
+        error instanceof AppError ? error.status : 502,
+      correlationId:
+        error instanceof AppError ? error.correlationId : undefined,
+      operationType: "database.live.verify",
+      idempotencyStatus: "not_applicable",
+      result: "failure",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        binding.name,
+        binding.user,
+      ],
+    });
+    throw error;
+  }
+  if (
+    !live ||
+    live.name !== binding.name ||
+    live.user !== binding.user ||
+    live.domain !== normalizeDomain(binding.domain) ||
+    live.domain !== normalizeDomain(current.site.primaryDomain)
+  ) {
     await writeAuditSafely(dependencies.audit ?? writeAuditEvent, {
       actorUserId: current.user.id,
       siteId: current.site.siteId,
@@ -902,10 +1168,40 @@ async function verifyLiveBinding(
         reason: "live_domain_ownership_not_confirmed",
       },
     });
+    reportHostingerOperationDiagnostic({
+      referenceId,
+      phase: "database_live_verification",
+      upstreamStatus: 404,
+      operationType: "database.live.verify",
+      idempotencyStatus: "not_applicable",
+      result: "denied",
+      startedAt,
+      forbiddenValues: [
+        current.site.hostingerUsername,
+        current.site.primaryDomain,
+        binding.name,
+        binding.user,
+      ],
+    });
     throw new AppError("NOT_FOUND", "Database not found.", 404);
   }
   const sync = dependencies.syncDatabases ?? syncSiteDatabases;
   await sync(current.site.siteId, [live]);
+  reportHostingerOperationDiagnostic({
+    referenceId,
+    phase: "database_live_verification",
+    upstreamStatus: 200,
+    operationType: "database.live.verify",
+    idempotencyStatus: "not_applicable",
+    result: "success",
+    startedAt,
+    forbiddenValues: [
+      current.site.hostingerUsername,
+      current.site.primaryDomain,
+      binding.name,
+      binding.user,
+    ],
+  });
   return live;
 }
 
@@ -914,25 +1210,99 @@ async function findLiveDatabaseByName(
   client: Pick<DatabaseClient, "listDatabases">,
   name: string,
 ) {
-  let page = 1;
-  do {
-    const result = await client.listDatabases(
+  const result = await client.listDatabases(
+    current.site.hostingerUsername,
+    current.site.primaryDomain,
+    { page: 1, perPage: 100, search: name },
+    { allowUnfilteredFallback: true },
+  );
+  return result.databases.find(
+    (database) => database.name === name,
+  );
+}
+
+async function reconcileCreatedDatabase(
+  current: DatabaseAccessContext,
+  client: Pick<DatabaseClient, "listDatabases">,
+  name: string,
+  user: string,
+  dependencies: DatabaseServiceDependencies,
+) {
+  const sleep =
+    dependencies.sleep ??
+    (async (milliseconds: number) =>
+      await new Promise<void>((resolve) =>
+        setTimeout(resolve, milliseconds),
+      ));
+  for (const delay of [0, 250, 750]) {
+    if (delay > 0) await sleep(delay);
+    try {
+      const live = await findLiveDatabaseByName(current, client, name);
+      if (
+        live &&
+        live.name === name &&
+        live.user === user &&
+        live.domain === normalizeDomain(current.site.primaryDomain)
+      ) {
+        const sync = dependencies.syncDatabases ?? syncSiteDatabases;
+        await sync(current.site.siteId, [live]);
+        return true;
+      }
+    } catch {
+      // Creation is already accepted; reconciliation remains best-effort.
+    }
+  }
+  return false;
+}
+
+async function assertRemoteConnectionPresent(
+  current: DatabaseAccessContext,
+  binding: SiteDatabaseRecord,
+  ip: string,
+  client: Pick<DatabaseClient, "listDatabaseRemoteConnections">,
+) {
+  const result = await client.listDatabaseRemoteConnections(
+    current.site.hostingerUsername,
+    current.site.primaryDomain,
+  );
+  if (
+    !result.connections.some(
+      (connection) =>
+        connection.databaseName === binding.name &&
+        connection.databaseUser === binding.user &&
+        connection.ip === ip,
+    )
+  ) {
+    throw new AppError(
+      "NOT_FOUND",
+      "The remote connection is no longer authorized.",
+      404,
+    );
+  }
+}
+
+async function reconcileRemoteConnection(
+  current: DatabaseAccessContext,
+  binding: SiteDatabaseRecord,
+  ip: string,
+  action: "add" | "remove",
+  client: Pick<DatabaseClient, "listDatabaseRemoteConnections">,
+) {
+  try {
+    const result = await client.listDatabaseRemoteConnections(
       current.site.hostingerUsername,
       current.site.primaryDomain,
-      { page, perPage: 100, search: name },
     );
-    const match = result.databases.find(
-      (database) => database.name === name,
+    const exists = result.connections.some(
+      (connection) =>
+        connection.databaseName === binding.name &&
+        connection.databaseUser === binding.user &&
+        connection.ip === ip,
     );
-    if (match) return match;
-    if (!result.pagination.hasNext) return undefined;
-    page += 1;
-  } while (page <= 100);
-  throw new AppError(
-    "HOSTINGER_ERROR",
-    "Hostinger returned an unsupported database result size.",
-    502,
-  );
+    return action === "add" ? exists : !exists;
+  } catch {
+    return false;
+  }
 }
 
 async function listAllLiveDatabases(
@@ -1160,6 +1530,28 @@ function remoteIdentity(name: string, user: string) {
   return `${name}\u0000${user}`;
 }
 
+function isAmbiguousDeleteError(error: unknown) {
+  return (
+    error instanceof AppError &&
+    (error.status === 404 ||
+      error.status === 503 ||
+      error.status === 504)
+  );
+}
+
+function diagnosticPhase(request: string): HostingerDiagnosticPhase {
+  if (request === "database_create") return "database_create";
+  if (request === "database_password_change") {
+    return "database_change_password";
+  }
+  if (request === "database_repair") return "database_repair";
+  if (request === "database_delete") return "database_delete";
+  if (request === "database_remote_connection_add") {
+    return "database_remote_add";
+  }
+  return "database_remote_remove";
+}
+
 function safeCorrelationId(
   value: unknown,
   current: DatabaseAccessContext,
@@ -1194,7 +1586,9 @@ function controlledMutationError(
   if (error instanceof AppError) {
     return new AppError(
       error.code,
-      error.message,
+      error.status === 504
+        ? "The Hostinger result is ambiguous. Do not retry with a new idempotency key."
+        : error.message,
       error.status,
       safeCorrelationId(error.correlationId, current, databaseName),
       referenceId,

@@ -10,6 +10,8 @@ import {
   Gauge,
   Settings2,
   ShieldCheck,
+  ShieldAlert,
+  Wrench,
   Users,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -17,7 +19,13 @@ import { cn } from "@/lib/utils";
 const items = [
   { href: "/overview", label: "Overview", icon: Gauge },
   { href: "/builds", label: "Node.js builds", icon: Blocks },
+  {
+    href: "/vulnerabilities",
+    label: "Vulnerabilities",
+    icon: ShieldAlert,
+  },
   { href: "/databases", label: "Databases", icon: Database },
+  { href: "/site-tools", label: "Site tools", icon: Wrench },
   { href: "/team", label: "Team", icon: Users },
   { href: "/site-settings", label: "Site settings", icon: Settings2 },
   { href: "/capabilities", label: "Capabilities", icon: Activity },

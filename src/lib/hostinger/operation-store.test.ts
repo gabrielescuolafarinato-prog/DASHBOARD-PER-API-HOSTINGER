@@ -50,6 +50,25 @@ describe("durable Hostinger operation claims", () => {
     expect(rendered.sql).not.toContain("database.delete:");
   });
 
+  it("applies cooldown to a shared resource scope as well as in-progress work", () => {
+    const rendered = new PgDialect().sqlToQuery(
+      buildOperationClaimQuery({
+        siteId: "11111111-1111-4111-8111-111111111111",
+        actorUserId: "22222222-2222-4222-8222-222222222222",
+        operationType: "site.cache.enable",
+        resourceKeyHash: "c".repeat(64),
+        idempotencyKeyHash: "a".repeat(64),
+        referenceId: "abcdef123456",
+        cooldownSeconds: 15,
+      }),
+    );
+    expect(rendered.sql).toContain(
+      "operation.created_at >=",
+    );
+    expect(rendered.params).toContain(15);
+    expect(rendered.params).toContain("c".repeat(64));
+  });
+
   it.each([
     ["CLAIMED", { kind: "claimed" }],
     ["DUPLICATE", { kind: "duplicate" }],

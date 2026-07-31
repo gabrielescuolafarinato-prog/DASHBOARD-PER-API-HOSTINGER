@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   claimDatabaseSubmission,
+  claimDatabaseRequest,
+  releaseDatabaseRequest,
   releaseDatabaseSubmission,
 } from "./database-submission-guard";
 
@@ -17,5 +19,19 @@ describe("database submission guard", () => {
     claimDatabaseSubmission(lock);
     releaseDatabaseSubmission(lock);
     expect(claimDatabaseSubmission(lock)).toBe(true);
+  });
+
+  it("blocks only a duplicate request for the same database", () => {
+    const active = new Set<string>();
+    expect(claimDatabaseRequest(active, "database-a")).toBe(true);
+    expect(claimDatabaseRequest(active, "database-a")).toBe(false);
+    expect(claimDatabaseRequest(active, "database-b")).toBe(true);
+  });
+
+  it("allows a manual retry after the database request is released", () => {
+    const active = new Set<string>();
+    claimDatabaseRequest(active, "database-a");
+    releaseDatabaseRequest(active, "database-a");
+    expect(claimDatabaseRequest(active, "database-a")).toBe(true);
   });
 });

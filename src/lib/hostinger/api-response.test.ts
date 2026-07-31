@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "@/lib/errors";
-import { apiFailure } from "./api-response";
+import { apiFailure, apiSuccess } from "./api-response";
 
 describe("controlled build API errors", () => {
+  it("sets private no-store and credential-safe headers on success", () => {
+    const response = apiSuccess({ link: "redacted" });
+    expect(response.headers.get("cache-control")).toContain(
+      "private, no-store",
+    );
+    expect(response.headers.get("pragma")).toBe("no-cache");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
   it.each([
     ["UNAUTHENTICATED", 401],
     ["FORBIDDEN", 403],

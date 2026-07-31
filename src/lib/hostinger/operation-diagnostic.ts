@@ -1,5 +1,11 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import {
+  phpMyAdminFailureKinds,
+  phpMyAdminResponseShapes,
+  type PhpMyAdminFailureKind,
+  type PhpMyAdminResponseShape,
+} from "./phpmyadmin-link";
 
 export const hostingerDiagnosticPhases = [
   "database_create",
@@ -35,6 +41,8 @@ export type HostingerOperationDiagnostic = {
     | "failed";
   result: "success" | "failure" | "denied" | "accepted";
   durationBucket: "<250ms" | "<1s" | "<3s" | "<10s" | ">=10s";
+  failureKind?: PhpMyAdminFailureKind;
+  responseShape?: PhpMyAdminResponseShape;
 };
 
 export function createDiagnosticReferenceId() {
@@ -51,6 +59,8 @@ export function reportHostingerOperationDiagnostic(input: {
   result: HostingerOperationDiagnostic["result"];
   startedAt?: number;
   forbiddenValues?: unknown[];
+  failureKind?: PhpMyAdminFailureKind;
+  responseShape?: PhpMyAdminResponseShape;
 }) {
   const diagnostic: HostingerOperationDiagnostic = {
     referenceId:
@@ -70,6 +80,18 @@ export function reportHostingerOperationDiagnostic(input: {
     input.forbiddenValues,
   );
   if (correlationId) diagnostic.correlationId = correlationId;
+  if (
+    input.failureKind &&
+    phpMyAdminFailureKinds.includes(input.failureKind)
+  ) {
+    diagnostic.failureKind = input.failureKind;
+  }
+  if (
+    input.responseShape &&
+    phpMyAdminResponseShapes.includes(input.responseShape)
+  ) {
+    diagnostic.responseShape = input.responseShape;
+  }
   console.error("hostinger_operation_diagnostic", diagnostic);
   return diagnostic.referenceId;
 }

@@ -30,8 +30,11 @@ import {
 } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
 import type { SiteDatabaseRecord } from "@/lib/hostinger/database-service";
+import { validatePhpMyAdminLink } from "@/lib/hostinger/phpmyadmin-link";
 import {
+  claimDatabaseRequest,
   claimDatabaseSubmission,
+  releaseDatabaseRequest,
   releaseDatabaseSubmission,
 } from "./database-submission-guard";
 
@@ -86,6 +89,12 @@ type Notice =
   | { tone: "success"; message: string; referenceId?: string }
   | { tone: "danger"; message: string; referenceId?: string };
 
+type PhpMyAdminLink = {
+  databaseId: string;
+  href: string;
+  referenceId: string;
+};
+
 export function DatabasesManager({ domain }: { domain: string }) {
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<PageResult>();
@@ -95,6 +104,11 @@ export function DatabasesManager({ domain }: { domain: string }) {
   const [modal, setModal] = useState<Modal>();
   const [pending, setPending] = useState(false);
   const [notice, setNotice] = useState<Notice>();
+  const [phpMyAdminLink, setPhpMyAdminLink] =
+    useState<PhpMyAdminLink>();
+  const [phpMyAdminPendingIds, setPhpMyAdminPendingIds] = useState<
+    ReadonlySet<string>
+  >(new Set());
   const [nameSuffix, setNameSuffix] = useState("");
   const [userSuffix, setUserSuffix] = useState("");
   const [password, setPassword] = useState("");
@@ -103,6 +117,7 @@ export function DatabasesManager({ domain }: { domain: string }) {
   const [remoteIp, setRemoteIp] = useState("");
   const controller = useRef<AbortController | undefined>(undefined);
   const submissionLock = useRef(false);
+  const phpMyAdminRequestLocks = useRef(new Set<string>());
   const idempotencyKey = useRef<string | undefined>(undefined);
 
   const load = useCallback(async (targetPage: number) => {
@@ -167,6 +182,17 @@ export function DatabasesManager({ domain }: { domain: string }) {
       controller.current?.abort();
     };
   }, [load]);
+
+  useEffect(() => {
+    if (!phpMyAdminLink) return;
+    const databaseId = phpMyAdminLink.databaseId;
+    const expiry = setTimeout(() => {
+      setPhpMyAdminLink((current) =>
+        current?.databaseId === databaseId ? undefined : current,
+      );
+    }, 60_000);
+    return () => clearTimeout(expiry);
+  }, [phpMyAdminLink]);
 
   function openModal(next: Modal) {
     clearForm();
@@ -265,9 +291,25 @@ export function DatabasesManager({ domain }: { domain: string }) {
     }
   }
 
-  async function openPhpMyAdmin(database: SiteDatabaseRecord) {
-    const target = window.open("", "_blank", "noopener,noreferrer");
-    if (target) target.opener = null;
+  async function requestPhpMyAdminLink(
+    database: SiteDatabaseRecord,
+  ) {
+    if (
+      !claimDatabaseRequest(
+        phpMyAdminRequestLocks.current,
+        database.id,
+      )
+    ) {
+      return;
+    }
+    setPhpMyAdminPendingIds((current) => {
+      const next = new Set(current);
+      next.add(database.id);
+      return next;
+    });
+    setPhpMyAdminLink((current) =>
+      current?.databaseId === database.id ? undefined : current,
+    );
     setNotice(undefined);
     try {
       const response = await fetch(
@@ -277,38 +319,68 @@ export function DatabasesManager({ domain }: { domain: string }) {
           cache: "no-store",
         },
       );
-      const body = (await response.json()) as ApiResult<{ link: string }>;
+      const body = (await response.json()) as ApiResult<{
+        link: string;
+        referenceId: string;
+      }>;
       if (!response.ok || !body.ok) {
-        target?.close();
-        throw apiResultError(
-          body,
-          "The phpMyAdmin link could not be generated.",
-        );
+        const failure = body.ok ? undefined : body.error;
+        setNotice({
+          tone: "danger",
+          message:
+            failure?.message ??
+            "The phpMyAdmin link could not be generated.",
+          referenceId: failure?.referenceId,
+        });
+        return;
       }
-      const link = new URL(body.data.link);
-      if (
-        link.protocol !== "https:" ||
-        !link.hostname.toLowerCase().endsWith(".hostinger.com")
-      ) {
-        target?.close();
-        throw new Error("Hostinger returned an invalid temporary link.");
+      let href: string;
+      try {
+        href = validatePhpMyAdminLink(body.data.link);
+      } catch {
+        setNotice({
+          tone: "danger",
+          message: "Hostinger returned an invalid temporary link.",
+          referenceId: body.data.referenceId,
+        });
+        return;
       }
-      if (!target) {
-        throw new Error(
-          "Allow pop-ups for this dashboard and request the link again.",
-        );
-      }
-      target.location.replace(link.toString());
-    } catch (linkError) {
-      target?.close();
+      setPhpMyAdminLink({
+        databaseId: database.id,
+        href,
+        referenceId: body.data.referenceId,
+      });
+      setNotice({
+        tone: "success",
+        message:
+          "Secure link ready. Use Open phpMyAdmin within 60 seconds.",
+        referenceId: body.data.referenceId,
+      });
+    } catch {
       setNotice({
         tone: "danger",
-        message:
-          linkError instanceof Error
-            ? linkError.message
-            : "The phpMyAdmin link could not be generated.",
+        message: "The phpMyAdmin link could not be generated.",
+      });
+    } finally {
+      releaseDatabaseRequest(
+        phpMyAdminRequestLocks.current,
+        database.id,
+      );
+      setPhpMyAdminPendingIds((current) => {
+        const next = new Set(current);
+        next.delete(database.id);
+        return next;
       });
     }
+  }
+
+  function consumePhpMyAdminLink(databaseId: string) {
+    setTimeout(() => {
+      setPhpMyAdminLink((current) =>
+        current?.databaseId === databaseId ? undefined : current,
+      );
+      setNotice(undefined);
+    }, 0);
   }
 
   const filteredCount = result
@@ -410,7 +482,20 @@ export function DatabasesManager({ domain }: { domain: string }) {
                     database={database}
                     connections={connections}
                     onAction={openModal}
-                    onPhpMyAdmin={() => void openPhpMyAdmin(database)}
+                    phpMyAdminPending={phpMyAdminPendingIds.has(
+                      database.id,
+                    )}
+                    phpMyAdminLink={
+                      phpMyAdminLink?.databaseId === database.id
+                        ? phpMyAdminLink
+                        : undefined
+                    }
+                    onPhpMyAdmin={() =>
+                      void requestPhpMyAdminLink(database)
+                    }
+                    onPhpMyAdminOpened={() =>
+                      consumePhpMyAdminLink(database.id)
+                    }
                   />
                 );
               })}
@@ -475,12 +560,18 @@ function DatabaseRow({
   database,
   connections,
   onAction,
+  phpMyAdminPending,
+  phpMyAdminLink,
   onPhpMyAdmin,
+  onPhpMyAdminOpened,
 }: {
   database: SiteDatabaseRecord;
   connections: { databaseId: string; ip: string }[];
   onAction: (modal: Modal) => void;
+  phpMyAdminPending: boolean;
+  phpMyAdminLink?: PhpMyAdminLink;
   onPhpMyAdmin: () => void;
+  onPhpMyAdminOpened: () => void;
 }) {
   const percentage = usagePercentage(database);
   return (
@@ -568,9 +659,28 @@ function DatabaseRow({
           />
           <ActionButton
             icon={ExternalLink}
-            label="phpMyAdmin"
+            label={
+              phpMyAdminPending
+                ? "Generating link"
+                : "phpMyAdmin"
+            }
+            pending={phpMyAdminPending}
+            disabled={phpMyAdminPending}
             onClick={onPhpMyAdmin}
           />
+          {phpMyAdminLink ? (
+            <a
+              className={primaryButtonClass}
+              href={phpMyAdminLink.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
+              onClick={onPhpMyAdminOpened}
+            >
+              <ExternalLink className="size-4" />
+              Open phpMyAdmin
+            </a>
+          ) : null}
           <ActionButton
             icon={KeyRound}
             label="Password"
@@ -794,11 +904,15 @@ function ActionButton({
   icon: Icon,
   label,
   danger,
+  disabled,
+  pending,
   onClick,
 }: {
   icon: typeof Plus;
   label: string;
   danger?: boolean;
+  disabled?: boolean;
+  pending?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -807,9 +921,14 @@ function ActionButton({
       className={`${secondaryButtonClass} ${
         danger ? "border-red-200 text-red-700 hover:bg-red-50" : ""
       }`}
+      disabled={disabled}
       onClick={onClick}
     >
-      <Icon className="size-4" />
+      {pending ? (
+        <LoaderCircle className="size-4 animate-spin" />
+      ) : (
+        <Icon className="size-4" />
+      )}
       {label}
     </button>
   );

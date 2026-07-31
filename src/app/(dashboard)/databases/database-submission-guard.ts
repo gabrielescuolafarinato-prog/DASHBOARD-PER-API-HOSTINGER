@@ -15,3 +15,19 @@ export function releaseDatabaseSubmission(
 ) {
   lock.current = false;
 }
+
+export function claimDatabaseRequest(
+  activeDatabaseIds: Set<string>,
+  databaseId: string,
+) {
+  if (activeDatabaseIds.has(databaseId)) return false;
+  activeDatabaseIds.add(databaseId);
+  return true;
+}
+
+export function releaseDatabaseRequest(
+  activeDatabaseIds: Set<string>,
+  databaseId: string,
+) {
+  activeDatabaseIds.delete(databaseId);
+}

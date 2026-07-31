@@ -41,13 +41,45 @@ describe("database dashboard surface", () => {
     );
   });
 
-  it("opens phpMyAdmin in a protected new tab without storing the link in state", () => {
+  it("never creates an about:blank tab before phpMyAdmin succeeds", () => {
+    expect(manager).not.toContain("window.open(");
+    expect(manager).not.toContain("about:blank");
+    expect(manager).not.toContain("target.location.replace");
+    expect(manager).toContain("requestPhpMyAdminLink");
+  });
+
+  it("shows a direct manual action that remains usable with popup blocking", () => {
+    expect(manager).toContain("Open phpMyAdmin");
+    expect(manager).toContain('target="_blank"');
+    expect(manager).toContain('rel="noopener noreferrer"');
+    expect(manager).toContain('referrerPolicy="no-referrer"');
+    expect(manager).toContain("href={phpMyAdminLink.href}");
+  });
+
+  it("keeps the temporary link only in short-lived React state", () => {
+    expect(manager).toContain("setPhpMyAdminLink");
+    expect(manager).toContain("60_000");
+    expect(manager).toContain("onClick={onPhpMyAdminOpened}");
+    expect(manager).toContain("setTimeout(() =>");
     expect(manager).toContain(
-      'window.open("", "_blank", "noopener,noreferrer")',
+      "current?.databaseId === databaseId ? undefined : current",
     );
-    expect(manager).toContain("target.opener = null");
-    expect(manager).toContain("target.location.replace");
-    expect(manager).not.toMatch(/setPhp|useState<.*link/i);
+    expect(manager).not.toMatch(/localStorage|sessionStorage/);
+  });
+
+  it("blocks duplicate requests only for the selected database", () => {
+    expect(manager).toContain("phpMyAdminRequestLocks");
+    expect(manager).toContain("claimDatabaseRequest(");
+    expect(manager).toContain("phpMyAdminPendingIds.has(");
+    expect(manager).toContain("releaseDatabaseRequest(");
+  });
+
+  it("shows a controlled failure and reference without creating a window", () => {
+    expect(manager).toContain("failure?.referenceId");
+    expect(manager).toContain(
+      "The phpMyAdmin link could not be generated.",
+    );
+    expect(manager).not.toContain("target?.close()");
   });
 
   it("adds the Databases destination to the common sidebar", () => {

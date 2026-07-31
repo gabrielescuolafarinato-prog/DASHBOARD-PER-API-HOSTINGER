@@ -9,11 +9,18 @@ import {
   vulnerabilitySeverities,
   type VulnerabilitySeverity,
 } from "./vulnerability-constants";
+import {
+  decodePhpMyAdminLink,
+  PhpMyAdminLinkError,
+  validatePhpMyAdminLink,
+  type PhpMyAdminResponseShape,
+} from "./phpmyadmin-link";
 
 export {
   vulnerabilitySeverities,
   type VulnerabilitySeverity,
 } from "./vulnerability-constants";
+export { validatePhpMyAdminLink } from "./phpmyadmin-link";
 
 export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
 
@@ -117,6 +124,7 @@ export type HostingerMutationResult = {
 
 export type HostingerPhpMyAdminLink = {
   link: string;
+  responseShape: PhpMyAdminResponseShape;
   correlationId?: string;
 };
 
@@ -282,10 +290,6 @@ const hostingerRemoteConnectionSchema = z.object({
 const hostingerRemoteConnectionCollectionSchema = z
   .array(z.unknown())
   .max(10_000);
-
-const hostingerPhpMyAdminLinkSchema = z.object({
-  link: z.string().min(1).max(4_096),
-});
 
 const vulnerabilityIdSchema = z
   .string()
@@ -1180,20 +1184,40 @@ export class HostingerClient {
     configuredUsername: string,
     databaseName: string,
   ): Promise<HostingerPhpMyAdminLink> {
-    const response = await this.request(
-      "GET",
-      databasePath(
-        configuredUsername,
-        databaseName,
-        "/phpmyadmin-link",
-      ),
-    );
-    const parsed = hostingerPhpMyAdminLinkSchema.safeParse(
+    let response: HostingerResponse;
+    try {
+      response = await this.request(
+        "GET",
+        databasePath(
+          configuredUsername,
+          databaseName,
+          "/phpmyadmin-link",
+        ),
+      );
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        error.status === 502 &&
+        error.message === "Hostinger returned an invalid response."
+      ) {
+        throw new PhpMyAdminLinkError(
+          "response_shape",
+          error.correlationId,
+        );
+      }
+      throw error;
+    }
+    const decoded = decodePhpMyAdminLink(
       response.payload,
+      response.correlationId,
     );
-    if (!parsed.success) throw malformedResponse(response.correlationId);
     return {
-      link: validatePhpMyAdminLink(parsed.data.link),
+      link: validatePhpMyAdminLink(
+        decoded.link,
+        response.correlationId,
+        decoded.responseShape,
+      ),
+      responseShape: decoded.responseShape,
       correlationId: response.correlationId,
     };
   }
@@ -1423,33 +1447,6 @@ function controlledDatabaseReadError(
     undefined,
     referenceId,
   );
-}
-
-export function validatePhpMyAdminLink(value: string) {
-  let link: URL;
-  try {
-    link = new URL(value);
-  } catch {
-    throw malformedResponse();
-  }
-  const hostname = link.hostname.toLowerCase();
-  if (
-    link.protocol !== "https:" ||
-    Boolean(link.username) ||
-    Boolean(link.password) ||
-    (link.port !== "" && link.port !== "443") ||
-    !hostname.endsWith(".hostinger.com") ||
-    hostname === "hostinger.com" ||
-    Boolean(link.hash) ||
-    [...link.searchParams.keys()].some((key) =>
-      /(?:^|[_-])(?:user(?:name)?|password|pass|pwd)(?:$|[_-])/i.test(
-        key,
-      ),
-    )
-  ) {
-    throw malformedResponse();
-  }
-  return link.toString();
 }
 
 export function validateAdvisoryLink(value: string) {

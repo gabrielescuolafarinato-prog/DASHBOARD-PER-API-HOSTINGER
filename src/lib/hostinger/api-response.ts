@@ -4,6 +4,9 @@ import { AppError } from "@/lib/errors";
 
 const noStoreHeaders = {
   "Cache-Control": "private, no-store, max-age=0",
+  Pragma: "no-cache",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
 };
 
 const REFERENCE_ID_PATTERN = /^[a-f0-9]{12}$/;

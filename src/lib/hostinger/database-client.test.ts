@@ -616,7 +616,7 @@ describe("Hostinger database client", () => {
   });
 
   it("accepts only temporary HTTPS links on an allowlisted Hostinger host", async () => {
-    const { client } = clientWith({
+    const { client, fetchImpl } = clientWith({
       link: "https://auth-db123.hostinger.com/signon.php?sid=temporary",
       extra: "must-not-escape",
     });
@@ -624,8 +624,13 @@ describe("Hostinger database client", () => {
       client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
     ).resolves.toEqual({
       link: "https://auth-db123.hostinger.com/signon.php?sid=temporary",
+      responseShape: "direct",
       correlationId: "corr-db",
     });
+    expect(fetchImpl.mock.calls[0][0]).toBe(
+      "https://developers.hostinger.com/api/hosting/v1/accounts/u1/databases/u1_shop/phpmyadmin-link",
+    );
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "GET" });
     expect(() =>
       validatePhpMyAdminLink("http://auth-db123.hostinger.com/signon"),
     ).toThrow();
@@ -640,6 +645,115 @@ describe("Hostinger database client", () => {
         "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
       ),
     ).toThrow();
+  });
+
+  it("accepts only the bounded data wrapper for a phpMyAdmin link", async () => {
+    const { client } = clientWith({
+      data: {
+        link: "https://auth-db123.hostinger.com/signon.php?sid=temporary",
+        raw: "must-not-escape",
+      },
+    });
+
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).resolves.toEqual({
+      link: "https://auth-db123.hostinger.com/signon.php?sid=temporary",
+      responseShape: "data_wrapper",
+      correlationId: "corr-db",
+    });
+  });
+
+  it.each([
+    [
+      {
+        link:
+          "https://auth-db123.hostinger.com/signon.php?sid=one",
+        data: {
+          link:
+            "https://auth-db123.hostinger.com/signon.php?sid=two",
+        },
+      },
+      "ambiguous_link",
+    ],
+    [{ data: {} }, "missing_link"],
+    [{ link: 123 }, "response_shape"],
+    [[{ link: "https://auth-db123.hostinger.com/signon" }], "response_shape"],
+  ] as const)(
+    "rejects a phpMyAdmin payload as %s",
+    async (payload, failureKind) => {
+      const { client } = clientWith(payload);
+      await expect(
+        client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+      ).rejects.toMatchObject({
+        status: 502,
+        failureKind,
+      });
+    },
+  );
+
+  it("preserves only the static response shape when URL validation fails", async () => {
+    const { client } = clientWith({
+      data: {
+        link: "https://hostinger.com.evil.example/signon.php?sid=private",
+      },
+    });
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).rejects.toMatchObject({
+      status: 502,
+      failureKind: "invalid_host_boundary",
+      responseShape: "data_wrapper",
+    });
+  });
+
+  it("classifies a non-JSON success body as response_shape without exposing it", async () => {
+    const rawBody = "temporary-link-body-must-not-escape";
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(rawBody, {
+          status: 200,
+          headers: { "x-correlation-id": "corr-db" },
+        }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).rejects.toMatchObject({
+      status: 502,
+      failureKind: "response_shape",
+      correlationId: "corr-db",
+    });
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).rejects.not.toThrow(rawBody);
+  });
+
+  it("classifies an empty successful body as missing_link", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(null, {
+          status: 200,
+          headers: { "x-correlation-id": "corr-db" },
+        }),
+      );
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).rejects.toMatchObject({
+      status: 502,
+      failureKind: "missing_link",
+    });
   });
 
   it.each<[number, AppErrorCode, number]>([

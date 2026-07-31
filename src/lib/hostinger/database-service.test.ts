@@ -5,6 +5,7 @@ import {
   changeDatabasePasswordForSite,
   createDatabaseForSite,
   deleteDatabaseForSite,
+  getPhpMyAdminLinkForSite,
   listDatabasesForSite,
   listRemoteConnectionsForSite,
   removeRemoteConnectionForSite,
@@ -12,6 +13,7 @@ import {
   type DatabaseAccessContext,
   type SiteDatabaseRecord,
 } from "./database-service";
+import { PhpMyAdminLinkError } from "./phpmyadmin-link";
 
 const siteId = "11111111-1111-4111-8111-111111111111";
 const actorId = "22222222-2222-4222-8222-222222222222";
@@ -647,6 +649,137 @@ describe("site-confined database service", () => {
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND", status: 404 });
     expect(removeDatabaseRemoteConnection).not.toHaveBeenCalled();
+  });
+
+  it.each(["ADMIN", "MEMBER"] as const)(
+    "live-verifies phpMyAdmin for %s through the safe 422 fallback contract",
+    async (membershipRole) => {
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      const temporaryLink =
+        "https://auth-db123.hostinger.com/signon.php?sid=sanitized";
+      const client = {
+        listDatabases: vi.fn(async () => page([liveDatabase])),
+        getDatabasePhpMyAdminLink: vi.fn(async () => ({
+          link: temporaryLink,
+          responseShape: "data_wrapper" as const,
+          correlationId: "corr-safe",
+        })),
+      };
+
+      const result = await getPhpMyAdminLinkForSite(
+        context(membershipRole),
+        databaseId,
+        successfulMutationDependencies(client),
+      );
+
+      expect(result).toEqual({
+        link: temporaryLink,
+        referenceId: "abcdef123456",
+      });
+      expect(client.listDatabases).toHaveBeenCalledWith(
+        "u123",
+        "example.com",
+        { page: 1, perPage: 100, search: "u123_shop" },
+        { allowUnfilteredFallback: true },
+      );
+      expect(client.getDatabasePhpMyAdminLink).toHaveBeenCalledWith(
+        "u123",
+        "u123_shop",
+      );
+      expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+        phase: "database_phpmyadmin",
+        result: "success",
+        responseShape: "data_wrapper",
+      });
+      expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+        /auth-db|hostinger\.com|sid=|u123_shop|example\.com/i,
+      );
+      expect(JSON.stringify(audit.mock.calls)).not.toMatch(
+        /auth-db|hostinger\.com|sid=|u123_shop|example\.com/i,
+      );
+      consoleError.mockRestore();
+    },
+  );
+
+  it.each([
+    "response_shape",
+    "invalid_host_boundary",
+  ] as const)(
+    "reports phpMyAdmin %s without payload or hostname",
+    async (failureKind) => {
+      const consoleError = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => undefined);
+      const client = {
+        listDatabases: vi.fn(async () => page([liveDatabase])),
+        getDatabasePhpMyAdminLink: vi.fn(async () => {
+          throw new PhpMyAdminLinkError(
+            failureKind,
+            "corr-safe",
+            failureKind === "invalid_host_boundary"
+              ? "direct"
+              : undefined,
+          );
+        }),
+      };
+
+      await expect(
+        getPhpMyAdminLinkForSite(
+          context("MEMBER"),
+          databaseId,
+          successfulMutationDependencies(client),
+        ),
+      ).rejects.toMatchObject({
+        status: 502,
+        referenceId: "abcdef123456",
+      });
+
+      expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+        referenceId: "abcdef123456",
+        phase: "database_phpmyadmin",
+        failureKind,
+      });
+      expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+        /auth-db|hostinger\.com|signon|sid=|u123_shop|example\.com/i,
+      );
+      consoleError.mockRestore();
+    },
+  );
+
+  it("distinguishes a phpMyAdmin live-verification failure", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const client = {
+      listDatabases: vi.fn(async () => {
+        throw new AppError(
+          "HOSTINGER_ERROR",
+          "Hostinger rejected the configured site request.",
+          422,
+          "corr-safe",
+        );
+      }),
+      getDatabasePhpMyAdminLink: vi.fn(),
+    };
+
+    await expect(
+      getPhpMyAdminLinkForSite(
+        context("ADMIN"),
+        databaseId,
+        successfulMutationDependencies(client),
+      ),
+    ).rejects.toMatchObject({
+      status: 422,
+      referenceId: "abcdef123456",
+    });
+    expect(client.getDatabasePhpMyAdminLink).not.toHaveBeenCalled();
+    expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+      phase: "database_phpmyadmin",
+      failureKind: "live_verification",
+    });
+    consoleError.mockRestore();
   });
 
   it("distinguishes a database preflight failure from a remote endpoint failure", async () => {

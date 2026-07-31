@@ -13,6 +13,7 @@ import {
   type HostingerDatabasePage,
   type HostingerDatabaseSummary,
 } from "./client";
+import { PhpMyAdminLinkError } from "./phpmyadmin-link";
 import type {
   ChangeDatabasePasswordInput,
   CreateDatabaseInput,
@@ -550,8 +551,10 @@ export async function getPhpMyAdminLinkForSite(
   const referenceId =
     dependencies.createReferenceId?.() ??
     createDiagnosticReferenceId();
+  let liveVerificationComplete = false;
   try {
     await verifyLiveBinding(current, binding, client, dependencies);
+    liveVerificationComplete = true;
     const result = await client.getDatabasePhpMyAdminLink(
       current.site.hostingerUsername,
       binding.name,
@@ -577,6 +580,7 @@ export async function getPhpMyAdminLinkForSite(
       idempotencyStatus: "not_applicable",
       result: "success",
       startedAt,
+      responseShape: result.responseShape,
       forbiddenValues: [
         current.site.hostingerUsername,
         current.site.primaryDomain,
@@ -615,6 +619,15 @@ export async function getPhpMyAdminLinkForSite(
             undefined,
             referenceId,
           );
+    const failureKind = !liveVerificationComplete
+      ? "live_verification"
+      : error instanceof PhpMyAdminLinkError
+        ? error.failureKind
+        : "upstream_http";
+    const responseShape =
+      error instanceof PhpMyAdminLinkError
+        ? error.responseShape
+        : undefined;
     reportHostingerOperationDiagnostic({
       referenceId,
       phase: "database_phpmyadmin",
@@ -624,6 +637,8 @@ export async function getPhpMyAdminLinkForSite(
       idempotencyStatus: "not_applicable",
       result: "failure",
       startedAt,
+      failureKind,
+      responseShape,
       forbiddenValues: [
         current.site.hostingerUsername,
         current.site.primaryDomain,

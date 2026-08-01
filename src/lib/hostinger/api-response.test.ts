@@ -81,7 +81,7 @@ describe("controlled build API errors", () => {
         "corr-private",
         "a1b2c3d4e5f6",
         undefined,
-        "PHPMYADMIN_INVALID_HOST",
+        "PHPMYADMIN_LOCAL_HOSTNAME",
       ),
     );
 
@@ -92,7 +92,7 @@ describe("controlled build API errors", () => {
         message:
           "Hostinger returned an invalid phpMyAdmin link response.",
         referenceId: "a1b2c3d4e5f6",
-        diagnosticCode: "PHPMYADMIN_INVALID_HOST",
+        diagnosticCode: "PHPMYADMIN_LOCAL_HOSTNAME",
       },
     });
   });

@@ -13,7 +13,7 @@ import {
   decodePhpMyAdminLink,
   describePhpMyAdminPayload,
   PhpMyAdminLinkError,
-  validatePhpMyAdminLink,
+  validateAuthenticatedPhpMyAdminLink,
   type PhpMyAdminResponseShape,
 } from "./phpmyadmin-link";
 
@@ -21,8 +21,6 @@ export {
   vulnerabilitySeverities,
   type VulnerabilitySeverity,
 } from "./vulnerability-constants";
-export { validatePhpMyAdminLink } from "./phpmyadmin-link";
-
 export const HOSTINGER_API_BASE_URL = "https://developers.hostinger.com";
 
 export type HostingerWebsite = {
@@ -163,6 +161,7 @@ type ClientOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   baseUrl?: string;
+  phpMyAdminAllowedHostSuffixes?: readonly string[];
 };
 
 type HostingerResponse = {
@@ -1215,11 +1214,12 @@ export class HostingerClient {
       response.correlationId,
     );
     return {
-      link: validatePhpMyAdminLink(
-        decoded.link,
-        response.correlationId,
-        decoded.responseShape,
-      ),
+      link: validateAuthenticatedPhpMyAdminLink(decoded.link, {
+        correlationId: response.correlationId,
+        responseShape: decoded.responseShape,
+        allowedHostSuffixes:
+          this.options.phpMyAdminAllowedHostSuffixes,
+      }),
       responseShape: decoded.responseShape,
       correlationId: response.correlationId,
     };
@@ -1521,5 +1521,9 @@ export function createHostingerClient() {
       503,
     );
   }
-  return new HostingerClient({ token: env.HOSTINGER_API_TOKEN });
+  return new HostingerClient({
+    token: env.HOSTINGER_API_TOKEN,
+    phpMyAdminAllowedHostSuffixes:
+      env.HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES,
+  });
 }

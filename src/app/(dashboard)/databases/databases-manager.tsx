@@ -35,10 +35,6 @@ import {
 } from "@/lib/errors";
 import type { SiteDatabaseRecord } from "@/lib/hostinger/database-service";
 import {
-  PhpMyAdminLinkError,
-  validatePhpMyAdminLink,
-} from "@/lib/hostinger/phpmyadmin-link";
-import {
   claimDatabaseRequest,
   claimDatabaseSubmission,
   releaseDatabaseRequest,
@@ -360,25 +356,24 @@ export function DatabasesManager({ domain }: { domain: string }) {
         });
         return;
       }
-      let href: string;
-      try {
-        href = validatePhpMyAdminLink(body.data.link);
-      } catch (linkError) {
+      if (
+        typeof body.data.link !== "string" ||
+        body.data.link.length === 0 ||
+        typeof body.data.referenceId !== "string"
+      ) {
         setNotice({
           tone: "danger",
           message:
             "Hostinger returned an invalid phpMyAdmin link response.",
-          referenceId: body.data.referenceId,
-          diagnosticCode:
-            linkError instanceof PhpMyAdminLinkError
-              ? linkError.diagnosticCode
-              : "PHPMYADMIN_MALFORMED_URL",
+          diagnosticCode: "PHPMYADMIN_RESPONSE_SHAPE",
         });
         return;
       }
+      // The same-origin application endpoint returns this value only after
+      // the authenticated Hostinger client validates the temporary URL.
       setPhpMyAdminLink({
         databaseId: database.id,
-        href,
+        href: body.data.link,
         referenceId: body.data.referenceId,
       });
       setNotice({

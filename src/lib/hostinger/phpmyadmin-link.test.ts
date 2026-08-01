@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   decodePhpMyAdminLink,
+  parsePhpMyAdminAllowedHostSuffixes,
+  phpMyAdminDiagnosticCode,
   PhpMyAdminLinkError,
-  validatePhpMyAdminLink,
+  validateAuthenticatedPhpMyAdminLink,
 } from "./phpmyadmin-link";
 
 const directLink =
@@ -97,11 +99,10 @@ describe("phpMyAdmin temporary URL validation", () => {
   it.each([
     directLink,
     "https://auth-db-eu-01.hostinger.com/signon.php?sid=sanitized",
-    "https://database-access.hostinger.com/signon.php?sid=sanitized",
-    "https://nested.database-access.hostinger.com/signon.php?sid=sanitized",
+    "https://phpmyadmin-login.infrastructure-provider.net/signon.php?sid=sanitized",
     "https://auth-db123.hostinger.com:443/signon.php?sid=sanitized",
-  ])("accepts an HTTPS Hostinger subdomain: %s", (value) => {
-    expect(validatePhpMyAdminLink(value)).toBe(
+  ])("accepts a public HTTPS destination from Hostinger: %s", (value) => {
+    expect(validateAuthenticatedPhpMyAdminLink(value)).toBe(
       new URL(value).toString(),
     );
   });
@@ -113,21 +114,22 @@ describe("phpMyAdmin temporary URL validation", () => {
     "https://auth-db123.hostinger.com/signon.php?password=value",
     "https://auth-db123.hostinger.com/signon.php?user=a&password=b&signature=c",
   ])("treats the Hostinger query as opaque: %s", (value) => {
-    expect(validatePhpMyAdminLink(value)).toBe(
+    expect(validateAuthenticatedPhpMyAdminLink(value)).toBe(
       new URL(value).toString(),
     );
   });
 
   it.each([
-    [
-      "https://hostinger.com.evil.example/signon",
-      "invalid_host_boundary",
-    ],
-    [
-      "https://evilhostinger.com/signon",
-      "invalid_host_boundary",
-    ],
-    ["https://hostinger.com/signon", "invalid_host_boundary"],
+    ["https://localhost/signon", "local_hostname"],
+    ["https://db.localhost/signon", "local_hostname"],
+    ["https://intranet/signon", "invalid_public_hostname"],
+    ["https://127.0.0.1/signon", "ip_literal"],
+    ["https://[::1]/signon", "ip_literal"],
+    ["https://db.local/signon", "blocked_suffix"],
+    ["https://db.internal/signon", "blocked_suffix"],
+    ["https://db.test/signon", "blocked_suffix"],
+    ["https://db.invalid/signon", "blocked_suffix"],
+    ["https://db.example/signon", "blocked_suffix"],
     [
       "http://auth-db123.hostinger.com/signon",
       "invalid_protocol",
@@ -148,6 +150,7 @@ describe("phpMyAdmin temporary URL validation", () => {
       "https://auth-db123.hostinger.com/signon#temporary",
       "fragment_present",
     ],
+    ["//auth-db123.hostinger.com/signon", "malformed_url"],
     ["/signon.php?sid=abc123", "malformed_url"],
     ["not a url", "malformed_url"],
     [
@@ -158,20 +161,109 @@ describe("phpMyAdmin temporary URL validation", () => {
     "rejects unsafe URL %s as %s",
     (value, failureKind) => {
       expectFailure(
-        () => validatePhpMyAdminLink(value),
+        () => validateAuthenticatedPhpMyAdminLink(value),
         failureKind,
       );
     },
   );
 
+  it("rejects DNS labels longer than 63 characters", () => {
+    expectFailure(
+      () =>
+        validateAuthenticatedPhpMyAdminLink(
+          `https://${"a".repeat(64)}.net/signon`,
+        ),
+      "invalid_dns_syntax",
+    );
+  });
+
+  it("rejects hostnames longer than 253 characters", () => {
+    const hostname = `${"a".repeat(50)}.${"b".repeat(50)}.${"c".repeat(50)}.${"d".repeat(50)}.${"e".repeat(50)}.net`;
+    expectFailure(
+      () =>
+        validateAuthenticatedPhpMyAdminLink(
+          `https://${hostname}/signon`,
+        ),
+      "invalid_dns_syntax",
+    );
+  });
+
+  it("rejects invalid DNS label characters", () => {
+    expectFailure(
+      () =>
+        validateAuthenticatedPhpMyAdminLink(
+          "https://auth_db.public.net/signon",
+        ),
+      "invalid_dns_syntax",
+    );
+  });
+
   it("rejects an overlong URL before parsing it", () => {
     expectFailure(
       () =>
-        validatePhpMyAdminLink(
+        validateAuthenticatedPhpMyAdminLink(
           `https://auth-db123.hostinger.com/signon.php?sid=${"a".repeat(4_096)}`,
         ),
       "malformed_url",
     );
+  });
+
+  it("accepts a public host when optional pinning is absent", () => {
+    expect(
+      validateAuthenticatedPhpMyAdminLink(
+        "https://secure-login.public-provider.net/signon",
+      ),
+    ).toBe("https://secure-login.public-provider.net/signon");
+  });
+
+  it("accepts an exact configured suffix with a DNS-label boundary", () => {
+    expect(
+      validateAuthenticatedPhpMyAdminLink(
+        "https://secure-login.public-provider.net/signon",
+        { allowedHostSuffixes: ["public-provider.net"] },
+      ),
+    ).toBe("https://secure-login.public-provider.net/signon");
+  });
+
+  it("rejects a public host outside configured suffixes", () => {
+    expectFailure(
+      () =>
+        validateAuthenticatedPhpMyAdminLink(
+          "https://secure-login.other-provider.net/signon",
+          { allowedHostSuffixes: ["public-provider.net"] },
+        ),
+      "configured_host_not_allowed",
+    );
+  });
+});
+
+describe("phpMyAdmin optional host pinning configuration", () => {
+  it("normalizes, deduplicates and preserves explicit suffixes", () => {
+    expect(
+      parsePhpMyAdminAllowedHostSuffixes(
+        "public-provider.net, secure.public-provider.net,public-provider.net",
+      ),
+    ).toEqual([
+      "public-provider.net",
+      "secure.public-provider.net",
+    ]);
+  });
+
+  it.each([
+    "HTTPS://public-provider.net",
+    "*.public-provider.net",
+    "public-provider.net:443",
+    "public-provider.net/path",
+    "PUBLIC-PROVIDER.NET",
+    "localhost",
+    "db.local",
+    "127.0.0.1",
+    "public-provider.net,",
+    "public-provider..net",
+  ])("fails closed for malformed configured suffix %s", (value) => {
+    expect(() =>
+      parsePhpMyAdminAllowedHostSuffixes(value),
+    ).toThrow("Invalid phpMyAdmin host suffix configuration.");
   });
 });
 
@@ -184,7 +276,11 @@ function expectFailure(
     throw new Error("Expected phpMyAdmin validation to fail.");
   } catch (error) {
     expect(error).toBeInstanceOf(PhpMyAdminLinkError);
-    expect(error).toMatchObject({ failureKind, status: 502 });
+    expect(error).toMatchObject({
+      failureKind,
+      status: 502,
+      diagnosticCode: phpMyAdminDiagnosticCode(failureKind),
+    });
     expect(JSON.stringify(error)).not.toMatch(
       /auth-db|hostinger\.com|sid=|sanitized/i,
     );

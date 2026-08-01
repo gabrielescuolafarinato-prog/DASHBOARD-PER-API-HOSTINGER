@@ -707,7 +707,7 @@ describe("site-confined database service", () => {
 
   it.each([
     "response_shape",
-    "invalid_host_boundary",
+    "local_hostname",
   ] as const)(
     "reports phpMyAdmin %s without payload or hostname",
     async (failureKind) => {
@@ -720,7 +720,7 @@ describe("site-confined database service", () => {
           throw new PhpMyAdminLinkError(
             failureKind,
             "corr-safe",
-            failureKind === "invalid_host_boundary"
+            failureKind === "local_hostname"
               ? "direct"
               : "unknown",
             failureKind === "response_shape"
@@ -749,7 +749,7 @@ describe("site-confined database service", () => {
         diagnosticCode:
           failureKind === "response_shape"
             ? "PHPMYADMIN_RESPONSE_SHAPE"
-            : "PHPMYADMIN_INVALID_HOST",
+            : "PHPMYADMIN_LOCAL_HOSTNAME",
       });
 
       const diagnostics = phpMyAdminDiagnostics(consoleError);
@@ -770,7 +770,7 @@ describe("site-confined database service", () => {
         });
       }
       expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
-        /auth-db|hostinger\.com|signon|sid=|u123_shop|example\.com/i,
+        /auth-db|hostinger\.com|localhost|signon|sid=|u123_shop|example\.com/i,
       );
       consoleError.mockRestore();
     },

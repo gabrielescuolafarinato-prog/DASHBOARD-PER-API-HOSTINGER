@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { HostingerClient, validatePhpMyAdminLink } from "./client";
+import { HostingerClient } from "./client";
+import { validateAuthenticatedPhpMyAdminLink } from "./phpmyadmin-link";
 import type { AppErrorCode } from "@/lib/errors";
 
 function response(status: number, body: unknown, headers?: HeadersInit) {
@@ -9,7 +10,10 @@ function response(status: number, body: unknown, headers?: HeadersInit) {
   });
 }
 
-function clientWith(body: unknown) {
+function clientWith(
+  body: unknown,
+  phpMyAdminAllowedHostSuffixes?: readonly string[],
+) {
   const fetchImpl = vi
     .fn<typeof fetch>()
     .mockImplementation(async () =>
@@ -20,6 +24,7 @@ function clientWith(body: unknown) {
     client: new HostingerClient({
       token: "private-server-token",
       fetchImpl,
+      phpMyAdminAllowedHostSuffixes,
     }),
   };
 }
@@ -615,7 +620,7 @@ describe("Hostinger database client", () => {
     consoleError.mockRestore();
   });
 
-  it("accepts only temporary HTTPS links on an allowlisted Hostinger host", async () => {
+  it("accepts a temporary public HTTPS link from the authenticated endpoint", async () => {
     const { client, fetchImpl } = clientWith({
       link: "https://auth-db123.hostinger.com/signon.php?sid=temporary",
       extra: "must-not-escape",
@@ -632,21 +637,51 @@ describe("Hostinger database client", () => {
     );
     expect(fetchImpl.mock.calls[0][1]).toMatchObject({ method: "GET" });
     expect(() =>
-      validatePhpMyAdminLink("http://auth-db123.hostinger.com/signon"),
+      validateAuthenticatedPhpMyAdminLink(
+        "http://auth-db123.hostinger.com/signon",
+      ),
     ).toThrow();
     expect(() =>
-      validatePhpMyAdminLink("https://hostinger.com.evil.test/signon"),
+      validateAuthenticatedPhpMyAdminLink(
+        "https://localhost/signon",
+      ),
     ).toThrow();
     expect(() =>
-      validatePhpMyAdminLink("https://user:secret@db.hostinger.com/signon"),
+      validateAuthenticatedPhpMyAdminLink(
+        "https://user:secret@db.hostinger.com/signon",
+      ),
     ).toThrow();
     expect(
-      validatePhpMyAdminLink(
+      validateAuthenticatedPhpMyAdminLink(
         "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
       ),
     ).toBe(
       "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
     );
+  });
+
+  it("accepts the real-host-compatible public DNS model without a suffix pin", async () => {
+    const publicLink =
+      "https://secure-login.infrastructure-provider.net/signon.php?signature=temporary";
+    const { client } = clientWith({ link: publicLink });
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).resolves.toMatchObject({ link: publicLink, responseShape: "direct" });
+  });
+
+  it("applies an optional server-side suffix pin", async () => {
+    const publicLink =
+      "https://secure-login.infrastructure-provider.net/signon.php";
+    const { client } = clientWith(
+      { link: publicLink },
+      ["approved-provider.net"],
+    );
+    await expect(
+      client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
+    ).rejects.toMatchObject({
+      failureKind: "configured_host_not_allowed",
+      diagnosticCode: "PHPMYADMIN_CONFIGURED_HOST_NOT_ALLOWED",
+    });
   });
 
   it("accepts only the bounded data wrapper for a phpMyAdmin link", async () => {
@@ -697,14 +732,14 @@ describe("Hostinger database client", () => {
   it("preserves only the static response shape when URL validation fails", async () => {
     const { client } = clientWith({
       data: {
-        link: "https://hostinger.com.evil.example/signon.php?sid=private",
+        link: "https://localhost/signon.php?sid=private",
       },
     });
     await expect(
       client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
     ).rejects.toMatchObject({
       status: 502,
-      failureKind: "invalid_host_boundary",
+      failureKind: "local_hostname",
       responseShape: "data_wrapper",
     });
   });

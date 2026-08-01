@@ -1,3 +1,6 @@
+import "server-only";
+import { isIP } from "node:net";
+import { domainToASCII } from "node:url";
 import {
   AppError,
   type DiagnosticCode,
@@ -11,11 +14,16 @@ export const phpMyAdminFailureKinds = [
   "missing_link",
   "ambiguous_link",
   "invalid_protocol",
-  "invalid_host_boundary",
   "credentials_present",
   "invalid_port",
   "fragment_present",
   "malformed_url",
+  "invalid_public_hostname",
+  "ip_literal",
+  "local_hostname",
+  "blocked_suffix",
+  "invalid_dns_syntax",
+  "configured_host_not_allowed",
   "upstream_http",
   "live_verification",
 ] as const;
@@ -64,14 +72,35 @@ const diagnosticCodeByFailureKind = {
   missing_link: "PHPMYADMIN_MISSING_LINK",
   ambiguous_link: "PHPMYADMIN_AMBIGUOUS_LINK",
   invalid_protocol: "PHPMYADMIN_INVALID_PROTOCOL",
-  invalid_host_boundary: "PHPMYADMIN_INVALID_HOST",
   credentials_present: "PHPMYADMIN_URL_CREDENTIALS",
   invalid_port: "PHPMYADMIN_INVALID_PORT",
   fragment_present: "PHPMYADMIN_FRAGMENT",
   malformed_url: "PHPMYADMIN_MALFORMED_URL",
+  invalid_public_hostname: "PHPMYADMIN_INVALID_PUBLIC_HOSTNAME",
+  ip_literal: "PHPMYADMIN_IP_LITERAL",
+  local_hostname: "PHPMYADMIN_LOCAL_HOSTNAME",
+  blocked_suffix: "PHPMYADMIN_BLOCKED_SUFFIX",
+  invalid_dns_syntax: "PHPMYADMIN_INVALID_DNS_SYNTAX",
+  configured_host_not_allowed:
+    "PHPMYADMIN_CONFIGURED_HOST_NOT_ALLOWED",
   upstream_http: "PHPMYADMIN_UPSTREAM",
   live_verification: "PHPMYADMIN_LIVE_VERIFICATION",
 } satisfies Record<PhpMyAdminFailureKind, DiagnosticCode>;
+
+const BLOCKED_PUBLIC_HOST_SUFFIXES = [
+  "local",
+  "localhost",
+  "internal",
+  "test",
+  "invalid",
+  "example",
+] as const;
+
+type AuthenticatedPhpMyAdminLinkOptions = {
+  correlationId?: string;
+  responseShape?: PhpMyAdminResponseShape;
+  allowedHostSuffixes?: readonly string[];
+};
 
 export function phpMyAdminDiagnosticCode(
   failureKind: PhpMyAdminFailureKind,
@@ -169,11 +198,17 @@ export function decodePhpMyAdminLink(
   );
 }
 
-export function validatePhpMyAdminLink(
+/**
+ * Validates only a link obtained from the authenticated, database-specific
+ * Hostinger phpMyAdmin endpoint. This is deliberately server-only and is not
+ * a general-purpose redirect validator.
+ */
+export function validateAuthenticatedPhpMyAdminLink(
   value: string,
-  correlationId?: string,
-  responseShape?: PhpMyAdminResponseShape,
+  options: AuthenticatedPhpMyAdminLinkOptions = {},
 ) {
+  const { correlationId, responseShape, allowedHostSuffixes } =
+    options;
   if (
     value.length === 0 ||
     value.length > MAX_PHPMYADMIN_LINK_LENGTH ||
@@ -219,13 +254,19 @@ export function validatePhpMyAdminLink(
     );
   }
 
-  const hostname = link.hostname.toLowerCase();
+  const hostname = normalizePublicDnsHostname(
+    link.hostname,
+    correlationId,
+    responseShape,
+  );
   if (
-    hostname === "hostinger.com" ||
-    !hostname.endsWith(".hostinger.com")
+    allowedHostSuffixes !== undefined &&
+    !allowedHostSuffixes.some((suffix) =>
+      hostnameMatchesSuffix(hostname, suffix),
+    )
   ) {
     throw new PhpMyAdminLinkError(
-      "invalid_host_boundary",
+      "configured_host_not_allowed",
       correlationId,
       responseShape,
     );
@@ -238,6 +279,110 @@ export function validatePhpMyAdminLink(
     );
   }
   return link.toString();
+}
+
+export function parsePhpMyAdminAllowedHostSuffixes(
+  value: string | undefined,
+) {
+  if (value === undefined) return undefined;
+  const entries = value.split(",");
+  if (entries.length === 0 || entries.some((entry) => !entry.trim())) {
+    throw new Error("Invalid phpMyAdmin host suffix configuration.");
+  }
+  const normalized = entries.map((entry) => {
+    const candidate = entry.trim();
+    if (
+      /[^\u0000-\u007f]/.test(candidate) ||
+      candidate !== candidate.toLowerCase() ||
+      candidate.includes("://") ||
+      /[/*:@?#\[\]\\]/.test(candidate)
+    ) {
+      throw new Error("Invalid phpMyAdmin host suffix configuration.");
+    }
+    try {
+      return normalizePublicDnsHostname(candidate);
+    } catch {
+      throw new Error("Invalid phpMyAdmin host suffix configuration.");
+    }
+  });
+  return [...new Set(normalized)];
+}
+
+function normalizePublicDnsHostname(
+  value: string,
+  correlationId?: string,
+  responseShape?: PhpMyAdminResponseShape,
+) {
+  const ipCandidate = value.startsWith("[") && value.endsWith("]")
+    ? value.slice(1, -1)
+    : value;
+  if (isIP(ipCandidate) !== 0) {
+    throw new PhpMyAdminLinkError(
+      "ip_literal",
+      correlationId,
+      responseShape,
+    );
+  }
+
+  const ascii = domainToASCII(value).toLowerCase();
+  if (!ascii || /[^\x00-\x7f]/.test(ascii)) {
+    throw new PhpMyAdminLinkError(
+      "invalid_dns_syntax",
+      correlationId,
+      responseShape,
+    );
+  }
+  if (
+    ascii === "localhost" ||
+    ascii.endsWith(".localhost")
+  ) {
+    throw new PhpMyAdminLinkError(
+      "local_hostname",
+      correlationId,
+      responseShape,
+    );
+  }
+
+  const labels = ascii.split(".");
+  if (labels.length < 2) {
+    throw new PhpMyAdminLinkError(
+      "invalid_public_hostname",
+      correlationId,
+      responseShape,
+    );
+  }
+  if (
+    ascii.length > 253 ||
+    labels.some(
+      (label) =>
+        label.length === 0 ||
+        label.length > 63 ||
+        !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label),
+    )
+  ) {
+    throw new PhpMyAdminLinkError(
+      "invalid_dns_syntax",
+      correlationId,
+      responseShape,
+    );
+  }
+  if (
+    BLOCKED_PUBLIC_HOST_SUFFIXES.some(
+      (suffix) =>
+        ascii === suffix || ascii.endsWith(`.${suffix}`),
+    )
+  ) {
+    throw new PhpMyAdminLinkError(
+      "blocked_suffix",
+      correlationId,
+      responseShape,
+    );
+  }
+  return ascii;
+}
+
+function hostnameMatchesSuffix(hostname: string, suffix: string) {
+  return hostname === suffix || hostname.endsWith(`.${suffix}`);
 }
 
 export function describePhpMyAdminPayload(

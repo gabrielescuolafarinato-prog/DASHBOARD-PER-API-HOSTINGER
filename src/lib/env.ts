@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { normalizeDomain } from "@/lib/hostinger/domain";
+import { parsePhpMyAdminAllowedHostSuffixes } from "@/lib/hostinger/phpmyadmin-link";
 
 export type EnvironmentSource = Record<string, string | undefined>;
 
@@ -83,9 +84,28 @@ const hostingerSchema = z
         }
       })
       .optional(),
+    HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES: z
+      .string()
+      .transform((value, context) => {
+        try {
+          return parsePhpMyAdminAllowedHostSuffixes(value);
+        } catch {
+          context.addIssue({
+            code: "custom",
+            message:
+              "must be a comma-separated list of lowercase public ASCII DNS suffixes",
+          });
+          return z.NEVER;
+        }
+      })
+      .optional(),
   })
   .superRefine((value, context) => {
-    const count = Object.values(value).filter(Boolean).length;
+    const count = [
+      value.HOSTINGER_API_TOKEN,
+      value.HOSTINGER_ACCOUNT_USERNAME,
+      value.HOSTINGER_SITE_DOMAIN,
+    ].filter(Boolean).length;
     if (count !== 0 && count !== 3) {
       context.addIssue({
         code: "custom",
@@ -321,6 +341,8 @@ export function parseHostingerEnv(source: EnvironmentSource) {
     HOSTINGER_ACCOUNT_USERNAME:
       source.HOSTINGER_ACCOUNT_USERNAME || undefined,
     HOSTINGER_SITE_DOMAIN: source.HOSTINGER_SITE_DOMAIN || undefined,
+    HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES:
+      source.HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES || undefined,
   };
   const result = hostingerSchema.safeParse(normalized);
   if (!result.success) throw formatError(result.error);
@@ -344,8 +366,14 @@ export function getHostingerConfigurationState(
   const present = values.filter(
     (value) => typeof value === "string" && value.length > 0,
   ).length;
+  const pinningConfigured =
+    typeof source.HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES ===
+      "string" &&
+    source.HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES.length > 0;
 
-  if (present === 0) return { status: "unconfigured", configured: false };
+  if (present === 0 && !pinningConfigured) {
+    return { status: "unconfigured", configured: false };
+  }
   if (present !== 3) return { status: "incomplete", configured: false };
 
   try {

@@ -72,6 +72,7 @@ La convenzione scelta dall’applicazione è `AUTH_SECRET` + `APP_URL`. Non impo
 | `HOSTINGER_API_TOKEN` | Opzionale, ma in gruppo | Production; normalmente assente in Preview | Segreta | Vuoto nel repository | hPanel Hostinger |
 | `HOSTINGER_ACCOUNT_USERNAME` | Opzionale, ma in gruppo | Production | Sensibile | `u123456789` | Account hosting |
 | `HOSTINGER_SITE_DOMAIN` | Opzionale, ma in gruppo | Production | Non segreta | `example.com` | Sito configurato |
+| `HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES` | Opzionale | Production | Sensibile | Vuoto | Pinning amministrativo verificato |
 | `BOOTSTRAP_OWNER_EMAIL` | Solo bootstrap | Shell locale/CI amministrativa | Dato personale | `owner@example.com` | Amministratore |
 | `BOOTSTRAP_OWNER_NAME` | Solo bootstrap | Shell locale/CI amministrativa | Dato personale | `Site Owner` | Amministratore |
 | `BOOTSTRAP_OWNER_PASSWORD` | Solo bootstrap | Shell locale/CI amministrativa | Segreta | `generated-strong-password` | Password manager |
@@ -91,6 +92,14 @@ Le tre variabili Hostinger devono essere tutte presenti oppure tutte assenti:
   credenziali, porta, path, query, fragment, wildcard e caratteri di controllo
   vengono rifiutati. Gli IDN sono convertiti nella forma ASCII canonica e il
   confronto resta esatto, senza trasformare sottodomini.
+
+`HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES` è una difesa aggiuntiva
+facoltativa e solo server-side. Se presente, deve contenere una lista separata
+da virgole di suffix DNS pubblici ASCII, lowercase, senza wildcard, protocollo,
+porta, path o valori locali. I valori vengono deduplicati e una configurazione
+malformata fallisce chiusa. Lasciarla assente finché il dominio infrastrutturale
+realmente restituito da Hostinger non è stato verificato; non dedurre suffix
+dall'esempio OpenAPI e non usare domini ipotetici.
 
 Se il gruppo è assente, l’onboarding mostra **Hostinger non configurato** e non
 effettua chiamate. Se è parziale mostra **Configurazione incompleta** e non
@@ -517,13 +526,21 @@ compatibilità l'envelope `{ "data": { "link": "..." } }`, già usato da altri
 endpoint Hostinger. Non effettua ricerche ricorsive: link assenti, non stringa,
 troppo lunghi o diversi nelle due forme vengono rifiutati.
 
-La URL temporanea è accettata soltanto con HTTPS, senza credenziali nella
-authority (`username:password@host`), fragment, caratteri di controllo o porta
-diversa da 443 e con hostname sotto il confine DNS esatto `.hostinger.com`; il
-dominio radice e suffissi ingannevoli come `hostinger.com.evil.example` sono
-negati. La query string firmata da Hostinger è trattata come opaca, resta
-inalterata e non viene interpretata in base ai nomi dei parametri. La risposta
-applicativa usa
+La URL temporanea viene accettata esclusivamente nel percorso della risposta
+autenticata di `HostingerClient.getDatabasePhpMyAdminLink()`: il validatore è
+server-only e non è un redirect generico. Richiede una URL assoluta HTTPS,
+senza credenziali nella authority (`username:password@host`), fragment,
+caratteri di controllo o porta diversa da 443. L'hostname viene convertito in
+ASCII e deve essere un nome DNS pubblico sintatticamente valido con almeno due
+label; IP letterali, localhost e sottodomini, single-label, label vuote o oltre
+63 caratteri, hostname oltre 253 caratteri e suffix `.local`, `.localhost`,
+`.internal`, `.test`, `.invalid` e `.example` vengono negati. L'esempio
+`.hostinger.com` nello schema OpenAPI non è un `pattern`, `enum` o altro vincolo
+normativo e non viene usato come allowlist. Se il pinning facoltativo è
+configurato, il nome deve inoltre coincidere con un suffix esplicito rispettando
+il confine delle label DNS. La query string firmata da Hostinger è trattata come
+opaca, resta inalterata e non viene interpretata in base ai nomi dei parametri.
+La risposta applicativa usa
 `Cache-Control: private, no-store`, `Pragma: no-cache`,
 `Referrer-Policy: no-referrer` e `X-Content-Type-Options: nosniff`. Dopo la
 generazione la UI mostra un'azione utente esplicita **Open phpMyAdmin** con
@@ -535,7 +552,9 @@ storage browser, URL della dashboard, log o audit.
 La diagnostica finale `database_phpmyadmin`, emessa una sola volta per
 richiesta, distingue con categorie statiche la
 verifica live, gli errori HTTP upstream, la forma risposta, link mancante o
-ambiguo e i singoli confini URL; può indicare soltanto forme e caratteristiche
+ambiguo e i singoli confini URL, inclusi hostname non pubblico, IP letterale,
+nome locale, suffix bloccato, sintassi DNS invalida e mancata corrispondenza al
+pinning configurato; può indicare soltanto forme e caratteristiche
 strutturali allowlistate, mai chiavi o valori del payload. Lo stesso reference
 ID è restituito con un `diagnosticCode` statico allowlistato e mostrato dalla
 UI. Non registra link, hostname, path, query, payload, database, utenti o

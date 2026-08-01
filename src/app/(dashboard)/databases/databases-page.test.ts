@@ -54,6 +54,11 @@ describe("database dashboard surface", () => {
     expect(manager).toContain('rel="noopener noreferrer"');
     expect(manager).toContain('referrerPolicy="no-referrer"');
     expect(manager).toContain("href={phpMyAdminLink.href}");
+    expect(manager).not.toContain("validatePhpMyAdminLink");
+    expect(manager).not.toContain("validateAuthenticatedPhpMyAdminLink");
+    expect(manager).not.toContain(
+      "HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES",
+    );
   });
 
   it("keeps the temporary link only in short-lived React state", () => {

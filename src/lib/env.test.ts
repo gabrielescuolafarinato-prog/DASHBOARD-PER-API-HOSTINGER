@@ -98,6 +98,74 @@ describe("environment validation", () => {
     expect(JSON.stringify(publicState)).not.toContain("u123456");
   });
 
+  it("parses optional phpMyAdmin host suffix pinning server-side", () => {
+    expect(
+      parseHostingerEnv({
+        HOSTINGER_API_TOKEN: "server-secret",
+        HOSTINGER_ACCOUNT_USERNAME: "u123456",
+        HOSTINGER_SITE_DOMAIN: "example.com",
+        HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES:
+          "public-provider.net,secure.public-provider.net,public-provider.net",
+      }),
+    ).toEqual({
+      HOSTINGER_API_TOKEN: "server-secret",
+      HOSTINGER_ACCOUNT_USERNAME: "u123456",
+      HOSTINGER_SITE_DOMAIN: "example.com",
+      HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES: [
+        "public-provider.net",
+        "secure.public-provider.net",
+      ],
+    });
+    const publicState = getHostingerConfigurationState({
+      HOSTINGER_API_TOKEN: "server-secret",
+      HOSTINGER_ACCOUNT_USERNAME: "u123456",
+      HOSTINGER_SITE_DOMAIN: "example.com",
+      HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES:
+        "public-provider.net",
+    });
+    expect(publicState).toEqual({
+      status: "ready",
+      configured: true,
+      domain: "example.com",
+    });
+    expect(JSON.stringify(publicState)).not.toContain(
+      "public-provider.net",
+    );
+  });
+
+  it.each([
+    "https://public-provider.net",
+    "*.public-provider.net",
+    "public-provider.net/path",
+    "public-provider.net:443",
+    "PUBLIC-PROVIDER.NET",
+    "localhost",
+    "127.0.0.1",
+    "db.internal",
+    "public-provider.net,",
+  ])("fails closed for malformed phpMyAdmin pinning %s", (value) => {
+    expect(() =>
+      parseHostingerEnv({
+        HOSTINGER_API_TOKEN: "server-secret",
+        HOSTINGER_ACCOUNT_USERNAME: "u123456",
+        HOSTINGER_SITE_DOMAIN: "example.com",
+        HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES: value,
+      }),
+    ).toThrow(/lowercase public ASCII DNS suffixes/);
+  });
+
+  it("reports malformed standalone pinning as incomplete without publishing it", () => {
+    const state = getHostingerConfigurationState({
+      HOSTINGER_PHPMYADMIN_ALLOWED_HOST_SUFFIXES:
+        "https://must-not-be-published.invalid",
+    });
+    expect(state).toEqual({
+      status: "incomplete",
+      configured: false,
+    });
+    expect(JSON.stringify(state)).not.toContain("must-not-be-published");
+  });
+
   it.each([
     "https://example.com",
     "*.example.com",

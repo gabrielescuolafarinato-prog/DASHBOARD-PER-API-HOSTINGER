@@ -44,7 +44,7 @@ describe("Hostinger operation diagnostics", () => {
 
   it.each([
     ["response_shape", "direct"],
-    ["invalid_host_boundary", "data_wrapper"],
+    ["local_hostname", "data_wrapper"],
   ] as const)(
     "logs static phpMyAdmin category %s without response data",
     (failureKind, responseShape) => {
@@ -74,6 +74,7 @@ describe("Hostinger operation diagnostics", () => {
         forbiddenValues: [
           "auth-db123.hostinger.com",
           "https://auth-db123.hostinger.com/signon.php?sid=private",
+          "localhost",
           "u123_shop",
         ],
       });
@@ -99,7 +100,7 @@ describe("Hostinger operation diagnostics", () => {
           : {}),
       });
       expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
-        /auth-db|hostinger\.com|signon|sid=|u123_shop/i,
+        /auth-db|hostinger\.com|localhost|signon|sid=|u123_shop/i,
       );
       consoleError.mockRestore();
     },

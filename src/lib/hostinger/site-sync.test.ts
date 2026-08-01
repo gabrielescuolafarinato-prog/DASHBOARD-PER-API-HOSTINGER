@@ -265,8 +265,8 @@ describe("atomic Hostinger site import", () => {
     const execute = vi
       .fn<ImportQueryExecutor>()
       .mockResolvedValue({ unexpected: "driver payload" });
-    const consoleError = vi
-      .spyOn(console, "error")
+    const consoleWarn = vi
+      .spyOn(console, "warn")
       .mockImplementation(() => undefined);
 
     await expect(
@@ -279,14 +279,14 @@ describe("atomic Hostinger site import", () => {
       siteId: "11111111-1111-4111-8111-111111111111",
     });
     expect(execute).toHaveBeenCalledOnce();
-    expect(consoleError).toHaveBeenCalledWith(
+    expect(consoleWarn).toHaveBeenCalledWith(
       "hostinger_site_import_diagnostic",
       expect.objectContaining({
         phase: "result_decode",
         result: "postcondition_recovered",
       }),
     );
-    consoleError.mockRestore();
+    consoleWarn.mockRestore();
   });
 
   it("returns a decode reference when the malformed response has no post-condition", async () => {

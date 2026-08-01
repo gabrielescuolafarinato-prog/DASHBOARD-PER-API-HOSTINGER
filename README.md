@@ -101,6 +101,12 @@ malformata fallisce chiusa. Lasciarla assente finché il dominio infrastruttural
 realmente restituito da Hostinger non è stato verificato; non dedurre suffix
 dall'esempio OpenAPI e non usare domini ipotetici.
 
+In Production è stato osservato, in forma sanitizzata, un hostname del tipo
+`auth-dbNNNN.hstgr.io`. Dopo aver verificato la destinazione reale, il pinning
+può quindi essere configurato server-side con il suffix `hstgr.io`. Inserire
+soltanto il suffix: niente protocollo, wildcard, porta, path o query. Non esporre
+la variabile al browser e creare un nuovo deployment dopo ogni modifica.
+
 Se il gruppo è assente, l’onboarding mostra **Hostinger non configurato** e non
 effettua chiamate. Se è parziale mostra **Configurazione incompleta** e non
 effettua chiamate. Quando è completo, il browser riceve soltanto il dominio

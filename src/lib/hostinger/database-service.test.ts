@@ -654,8 +654,8 @@ describe("site-confined database service", () => {
   it.each(["ADMIN", "MEMBER"] as const)(
     "live-verifies phpMyAdmin for %s through the safe 422 fallback contract",
     async (membershipRole) => {
-      const consoleError = vi
-        .spyOn(console, "error")
+      const consoleInfo = vi
+        .spyOn(console, "info")
         .mockImplementation(() => undefined);
       const temporaryLink =
         "https://auth-db123.hostinger.com/signon.php?sid=sanitized";
@@ -688,20 +688,20 @@ describe("site-confined database service", () => {
         "u123",
         "u123_shop",
       );
-      expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+      expect(consoleInfo.mock.calls.at(-1)?.[1]).toMatchObject({
         phase: "database_phpmyadmin",
         result: "success",
         responseShape: "data_wrapper",
         referenceId: result.referenceId,
       });
-      expect(phpMyAdminDiagnostics(consoleError)).toHaveLength(1);
-      expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+      expect(phpMyAdminDiagnostics(consoleInfo)).toHaveLength(1);
+      expect(JSON.stringify(consoleInfo.mock.calls)).not.toMatch(
         /auth-db|hostinger\.com|sid=|u123_shop|example\.com/i,
       );
       expect(JSON.stringify(audit.mock.calls)).not.toMatch(
         /auth-db|hostinger\.com|sid=|u123_shop|example\.com/i,
       );
-      consoleError.mockRestore();
+      consoleInfo.mockRestore();
     },
   );
 
@@ -812,8 +812,8 @@ describe("site-confined database service", () => {
   });
 
   it("emits one success diagnostic even when audit persistence fails", async () => {
-    const consoleError = vi
-      .spyOn(console, "error")
+    const consoleInfo = vi
+      .spyOn(console, "info")
       .mockImplementation(() => undefined);
     const failingAudit = vi.fn(async () => {
       throw new Error("audit storage unavailable");
@@ -842,18 +842,18 @@ describe("site-confined database service", () => {
       referenceId: "abcdef123456",
     });
     expect(failingAudit).toHaveBeenCalledTimes(1);
-    expect(phpMyAdminDiagnostics(consoleError)).toHaveLength(1);
-    expect(phpMyAdminDiagnostics(consoleError)[0]).toMatchObject({
+    expect(phpMyAdminDiagnostics(consoleInfo)).toHaveLength(1);
+    expect(phpMyAdminDiagnostics(consoleInfo)[0]).toMatchObject({
       result: "success",
       referenceId: "abcdef123456",
     });
-    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+    expect(JSON.stringify(consoleInfo.mock.calls)).not.toMatch(
       /auth-db|hostinger\.com|user=value|password=value|signature=/i,
     );
     expect(JSON.stringify(failingAudit.mock.calls)).not.toMatch(
       /auth-db|hostinger\.com|user=value|password=value|signature=/i,
     );
-    consoleError.mockRestore();
+    consoleInfo.mockRestore();
   });
 
   it("keeps the same reference and final diagnostic if controlled-error construction fails", async () => {

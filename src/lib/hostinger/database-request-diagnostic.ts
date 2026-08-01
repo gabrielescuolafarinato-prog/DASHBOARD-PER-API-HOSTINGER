@@ -1,5 +1,6 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
+import { emitStructuredDiagnostic } from "./structured-diagnostic";
 
 const REFERENCE_ID_PATTERN = /^[a-f0-9]{12}$/;
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
@@ -39,31 +40,87 @@ export function reportDatabaseRequestDiagnostic(input: {
   validationFields?: unknown[];
   result: DatabaseRequestDiagnostic["result"];
 }) {
-  const referenceId =
-    typeof input.referenceId === "string" &&
-    REFERENCE_ID_PATTERN.test(input.referenceId)
-      ? input.referenceId
-      : randomBytes(6).toString("hex");
-  const correlationId = sanitizeCorrelationId(
-    input.correlationId,
-    input.forbiddenValues,
-  );
-  const validationFields = sanitizeValidationFields(
-    input.validationFields,
-  );
-  const diagnostic: DatabaseRequestDiagnostic = {
+  let referenceId = "000000000000";
+  let fallbackDiagnostic: DatabaseRequestDiagnostic = {
     referenceId,
-    phase: input.phase,
-    upstreamStatus: safeStatus(input.upstreamStatus),
-    ...(correlationId ? { correlationId } : {}),
-    endpointKind: input.endpointKind,
-    attempt: input.attempt,
-    ...(validationFields.length > 0 ? { validationFields } : {}),
-    result: input.result,
+    phase: "database_list_filtered",
+    upstreamStatus: 502,
+    endpointKind: "database_list",
+    attempt: "filtered",
+    result: "failure",
   };
-
-  console.error("hostinger_database_request_diagnostic", diagnostic);
+  try {
+    referenceId = safeReferenceId(input.referenceId);
+    fallbackDiagnostic = {
+      referenceId,
+      phase: input.phase,
+      upstreamStatus: safeStatus(input.upstreamStatus),
+      endpointKind: input.endpointKind,
+      attempt: input.attempt,
+      result: input.result,
+    };
+    let correlationId: string | undefined;
+    let validationFields: string[] = [];
+    try {
+      correlationId = sanitizeCorrelationId(
+        input.correlationId,
+        input.forbiddenValues,
+      );
+      validationFields = sanitizeValidationFields(
+        input.validationFields,
+      );
+    } catch {
+      correlationId = undefined;
+      validationFields = [];
+    }
+    const diagnostic: DatabaseRequestDiagnostic = {
+      ...fallbackDiagnostic,
+      ...(correlationId ? { correlationId } : {}),
+      ...(validationFields.length > 0 ? { validationFields } : {}),
+    };
+    emitStructuredDiagnostic(
+      databaseRequestDiagnosticLevel(diagnostic),
+      "hostinger_database_request_diagnostic",
+      diagnostic,
+    );
+  } catch {
+    emitStructuredDiagnostic(
+      "error",
+      "hostinger_database_request_diagnostic",
+      fallbackDiagnostic,
+    );
+  }
   return referenceId;
+}
+
+function safeReferenceId(value?: string) {
+  if (typeof value === "string" && REFERENCE_ID_PATTERN.test(value)) {
+    return value;
+  }
+  try {
+    return randomBytes(6).toString("hex");
+  } catch {
+    return "000000000000";
+  }
+}
+
+function databaseRequestDiagnosticLevel(
+  diagnostic: DatabaseRequestDiagnostic,
+) {
+  if (
+    diagnostic.result === "retry" &&
+    diagnostic.attempt === "filtered" &&
+    diagnostic.upstreamStatus === 422
+  ) {
+    return "info";
+  }
+  if (
+    diagnostic.result === "success" &&
+    diagnostic.upstreamStatus < 400
+  ) {
+    return "info";
+  }
+  return "error" as const;
 }
 
 function sanitizeCorrelationId(

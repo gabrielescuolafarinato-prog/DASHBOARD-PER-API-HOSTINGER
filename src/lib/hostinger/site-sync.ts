@@ -15,6 +15,7 @@ import {
 } from "@/lib/hostinger/client";
 import { normalizeDomain } from "@/lib/hostinger/domain";
 import { AppError } from "@/lib/errors";
+import { emitStructuredDiagnostic } from "./structured-diagnostic";
 
 export type VerifiedConfiguredSite = {
   domain: string;
@@ -980,7 +981,11 @@ function logImportDiagnostic(input: {
     correlationId: sanitizeCorrelationId(input.correlationId),
     result: input.result,
   };
-  console.error("hostinger_site_import_diagnostic", diagnostic);
+  emitStructuredDiagnostic(
+    input.result === "failure" ? "error" : "warn",
+    "hostinger_site_import_diagnostic",
+    diagnostic,
+  );
   return diagnostic;
 }
 

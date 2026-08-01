@@ -9,6 +9,7 @@ import {
   type PhpMyAdminPayloadKind,
   type PhpMyAdminPayloadStructure,
 } from "./phpmyadmin-link";
+import { emitStructuredDiagnostic } from "./structured-diagnostic";
 
 export const hostingerDiagnosticPhases = [
   "database_create",
@@ -116,22 +117,29 @@ export function reportHostingerOperationDiagnostic(input: {
       diagnostic.responseShape = input.responseShape;
     }
     appendPayloadStructure(diagnostic, input.payloadStructure);
-    try {
-      console.error("hostinger_operation_diagnostic", diagnostic);
-    } catch {
-      // Diagnostics must never alter the application response.
-    }
+    emitStructuredDiagnostic(
+      operationDiagnosticLevel(diagnostic),
+      "hostinger_operation_diagnostic",
+      diagnostic,
+    );
   } catch {
-    try {
-      console.error(
-        "hostinger_operation_diagnostic",
-        fallbackDiagnostic,
-      );
-    } catch {
-      // A broken logger is deliberately ignored.
-    }
+    emitStructuredDiagnostic(
+      "error",
+      "hostinger_operation_diagnostic",
+      fallbackDiagnostic,
+    );
   }
   return referenceId;
+}
+
+function operationDiagnosticLevel(
+  diagnostic: HostingerOperationDiagnostic,
+) {
+  return diagnostic.upstreamStatus < 400 &&
+    (diagnostic.result === "success" ||
+      diagnostic.result === "accepted")
+    ? ("info" as const)
+    : ("error" as const);
 }
 
 function safeReferenceId(value?: string) {

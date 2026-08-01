@@ -16,6 +16,7 @@ import {
   type HostingerOperationClaim,
 } from "./operation-store";
 import { assertHostingerSiteAccess } from "./permissions";
+import { emitStructuredDiagnostic } from "./structured-diagnostic";
 
 export type RestartAccessContext = {
   user: { id: string };
@@ -427,12 +428,16 @@ function logRestartDiagnostic(
     ].includes(error.name)
       ? error.name
       : "UnknownError";
-  console.error("hostinger_node_restart_diagnostic", {
-    referenceId,
-    phase,
-    errorType,
-    result: "failure",
-  });
+  emitStructuredDiagnostic(
+    "error",
+    "hostinger_node_restart_diagnostic",
+    {
+      referenceId,
+      phase,
+      errorType,
+      result: "failure",
+    },
+  );
 }
 
 async function writeAuditSafely(

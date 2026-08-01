@@ -82,8 +82,8 @@ describe("Hostinger database client", () => {
   });
 
   it("retries one filtered 422 without filters and keeps the authoritative username", async () => {
-    const consoleError = vi
-      .spyOn(console, "error")
+    const consoleInfo = vi
+      .spyOn(console, "info")
       .mockImplementation(() => undefined);
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -158,33 +158,33 @@ describe("Hostinger database client", () => {
     expect(JSON.stringify(result)).not.toMatch(
       /other\.example|u1_foreign|u1_unassigned/i,
     );
-    expect(consoleError).toHaveBeenCalledTimes(2);
-    expect(consoleError.mock.calls[0][1]).toMatchObject({
+    expect(consoleInfo).toHaveBeenCalledTimes(2);
+    expect(consoleInfo.mock.calls[0][1]).toMatchObject({
       phase: "database_list_filtered",
       upstreamStatus: 422,
       correlationId: "corr-filtered",
       attempt: "filtered",
       result: "retry",
     });
-    expect(consoleError.mock.calls[1][1]).toMatchObject({
+    expect(consoleInfo.mock.calls[1][1]).toMatchObject({
       phase: "database_list_fallback",
       upstreamStatus: 200,
       correlationId: "corr-fallback",
       attempt: "fallback",
       result: "success",
       referenceId: (
-        consoleError.mock.calls[0][1] as { referenceId: string }
+        consoleInfo.mock.calls[0][1] as { referenceId: string }
       ).referenceId,
     });
-    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+    expect(JSON.stringify(consoleInfo.mock.calls)).not.toMatch(
       /Production-specific|private-server-token|example\.com|authoritative-user|u1_site/i,
     );
-    consoleError.mockRestore();
+    consoleInfo.mockRestore();
   });
 
   it("keeps search on the single unfiltered retry when explicitly requested", async () => {
-    const consoleError = vi
-      .spyOn(console, "error")
+    const consoleInfo = vi
+      .spyOn(console, "info")
       .mockImplementation(() => undefined);
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -212,7 +212,7 @@ describe("Hostinger database client", () => {
     expect(fetchImpl.mock.calls[1][0]).toBe(
       "https://developers.hostinger.com/api/hosting/v1/accounts/u1/databases?page=3&per_page=25&search=u1_shop",
     );
-    consoleError.mockRestore();
+    consoleInfo.mockRestore();
   });
 
   it("performs the unfiltered fallback only once and returns its reference ID on failure", async () => {
@@ -491,8 +491,8 @@ describe("Hostinger database client", () => {
   });
 
   it("retries a remote-list 422 once without domain", async () => {
-    const consoleError = vi
-      .spyOn(console, "error")
+    const consoleInfo = vi
+      .spyOn(console, "info")
       .mockImplementation(() => undefined);
     const fetchImpl = vi
       .fn<typeof fetch>()
@@ -538,18 +538,60 @@ describe("Hostinger database client", () => {
       },
     ]);
     expect(JSON.stringify(result)).not.toContain("must-not-escape");
-    expect(consoleError.mock.calls[0][1]).toMatchObject({
+    expect(consoleInfo.mock.calls[0][1]).toMatchObject({
       phase: "remote_list_filtered",
       result: "retry",
     });
-    expect(consoleError.mock.calls[1][1]).toMatchObject({
+    expect(consoleInfo.mock.calls[1][1]).toMatchObject({
       phase: "remote_list_fallback",
       result: "success",
     });
-    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+    expect(JSON.stringify(consoleInfo.mock.calls)).not.toMatch(
       /private validation body|authoritative-user|example\.com|u1_shop|192\.0\.2\.10/i,
     );
-    consoleError.mockRestore();
+    consoleInfo.mockRestore();
+  });
+
+  it("keeps database-list and remote-list fallback diagnostics independent", async () => {
+    const consoleInfo = vi
+      .spyOn(console, "info")
+      .mockImplementation(() => undefined);
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(422, {}))
+      .mockResolvedValueOnce(
+        response(200, {
+          data: [],
+          meta: { current_page: 1, per_page: 100, total: 0 },
+        }),
+      )
+      .mockResolvedValueOnce(response(422, {}))
+      .mockResolvedValueOnce(response(200, []));
+    const client = new HostingerClient({
+      token: "private-server-token",
+      fetchImpl,
+    });
+
+    await client.listDatabases(
+      "u1",
+      "example.com",
+      { page: 1, perPage: 100 },
+      { allowUnfilteredFallback: true },
+    );
+    await client.listDatabaseRemoteConnections("u1", "example.com");
+
+    const diagnostics = consoleInfo.mock.calls.map(
+      (call) => call[1] as { phase: string; referenceId: string },
+    );
+    expect(diagnostics.map((item) => item.phase)).toEqual([
+      "database_list_filtered",
+      "database_list_fallback",
+      "remote_list_filtered",
+      "remote_list_fallback",
+    ]);
+    expect(diagnostics[0].referenceId).toBe(diagnostics[1].referenceId);
+    expect(diagnostics[2].referenceId).toBe(diagnostics[3].referenceId);
+    expect(diagnostics[0].referenceId).not.toBe(diagnostics[2].referenceId);
   });
 
   it("returns the same safe reference when the remote fallback fails", async () => {

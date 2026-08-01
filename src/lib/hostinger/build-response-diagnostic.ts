@@ -1,6 +1,7 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import type { ZodError, ZodIssue } from "zod";
+import { emitStructuredDiagnostic } from "./structured-diagnostic";
 
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9._:/-]{1,200}$/;
 const MAX_DIAGNOSTIC_ITEMS_TO_INSPECT = 100;
@@ -84,7 +85,11 @@ export function reportBuildResponseDiagnostic(
     zodCodes,
   };
 
-  console.error("hostinger_build_response_diagnostic", diagnostic);
+  emitStructuredDiagnostic(
+    "error",
+    "hostinger_build_response_diagnostic",
+    diagnostic,
+  );
   return referenceId;
 }
 

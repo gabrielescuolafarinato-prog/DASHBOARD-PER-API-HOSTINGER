@@ -29,8 +29,15 @@ import {
   secondaryButtonClass,
 } from "@/components/ui";
 import { formatDate } from "@/lib/utils";
+import {
+  isDiagnosticCode,
+  type DiagnosticCode,
+} from "@/lib/errors";
 import type { SiteDatabaseRecord } from "@/lib/hostinger/database-service";
-import { validatePhpMyAdminLink } from "@/lib/hostinger/phpmyadmin-link";
+import {
+  PhpMyAdminLinkError,
+  validatePhpMyAdminLink,
+} from "@/lib/hostinger/phpmyadmin-link";
 import {
   claimDatabaseRequest,
   claimDatabaseSubmission,
@@ -70,6 +77,7 @@ type ApiResult<T> =
         message: string;
         retryAfterSeconds?: number;
         referenceId?: string;
+        diagnosticCode?: string;
       };
     };
 
@@ -86,8 +94,18 @@ type Modal =
     };
 
 type Notice =
-  | { tone: "success"; message: string; referenceId?: string }
-  | { tone: "danger"; message: string; referenceId?: string };
+  | {
+      tone: "success";
+      message: string;
+      referenceId?: string;
+      diagnosticCode?: DiagnosticCode;
+    }
+  | {
+      tone: "danger";
+      message: string;
+      referenceId?: string;
+      diagnosticCode?: DiagnosticCode;
+    };
 
 type PhpMyAdminLink = {
   databaseId: string;
@@ -261,6 +279,9 @@ export function DatabasesManager({ domain }: { domain: string }) {
           message:
             failure?.message ?? "The operation could not be completed.",
           referenceId: failure?.referenceId,
+          diagnosticCode: isDiagnosticCode(failure?.diagnosticCode)
+            ? failure.diagnosticCode
+            : undefined,
         });
         return;
       }
@@ -331,17 +352,27 @@ export function DatabasesManager({ domain }: { domain: string }) {
             failure?.message ??
             "The phpMyAdmin link could not be generated.",
           referenceId: failure?.referenceId,
+          diagnosticCode: isDiagnosticCode(
+            failure?.diagnosticCode,
+          )
+            ? failure.diagnosticCode
+            : undefined,
         });
         return;
       }
       let href: string;
       try {
         href = validatePhpMyAdminLink(body.data.link);
-      } catch {
+      } catch (linkError) {
         setNotice({
           tone: "danger",
-          message: "Hostinger returned an invalid temporary link.",
+          message:
+            "Hostinger returned an invalid phpMyAdmin link response.",
           referenceId: body.data.referenceId,
+          diagnosticCode:
+            linkError instanceof PhpMyAdminLinkError
+              ? linkError.diagnosticCode
+              : "PHPMYADMIN_MALFORMED_URL",
         });
         return;
       }
@@ -958,6 +989,11 @@ function NoticeBox({ notice }: { notice: Notice }) {
       <p className="font-semibold">{notice.message}</p>
       {notice.referenceId ? (
         <p className="mt-1 text-xs">Reference: {notice.referenceId}</p>
+      ) : null}
+      {notice.diagnosticCode ? (
+        <p className="mt-1 text-xs">
+          Diagnostic: {notice.diagnosticCode}
+        </p>
       ) : null}
     </div>
   );

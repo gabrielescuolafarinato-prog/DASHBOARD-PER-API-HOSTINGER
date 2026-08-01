@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { ZodError } from "zod";
-import { AppError } from "@/lib/errors";
+import { AppError, isDiagnosticCode } from "@/lib/errors";
 
 const noStoreHeaders = {
   "Cache-Control": "private, no-store, max-age=0",
@@ -55,6 +55,9 @@ export function apiFailure(error: unknown) {
             REFERENCE_ID_PATTERN.test(error.referenceId)
               ? error.referenceId
               : undefined,
+          diagnosticCode: isDiagnosticCode(error.diagnosticCode)
+            ? error.diagnosticCode
+            : undefined,
         },
       },
       { status: error.status, headers },

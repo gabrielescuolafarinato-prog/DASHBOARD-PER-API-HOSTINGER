@@ -11,6 +11,7 @@ import {
 } from "./vulnerability-constants";
 import {
   decodePhpMyAdminLink,
+  describePhpMyAdminPayload,
   PhpMyAdminLinkError,
   validatePhpMyAdminLink,
   type PhpMyAdminResponseShape,
@@ -1203,6 +1204,8 @@ export class HostingerClient {
         throw new PhpMyAdminLinkError(
           "response_shape",
           error.correlationId,
+          "unknown",
+          describePhpMyAdminPayload("non-json"),
         );
       }
       throw error;

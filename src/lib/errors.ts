@@ -10,6 +10,31 @@ export type AppErrorCode =
   | "RATE_LIMITED"
   | "INTERNAL_ERROR";
 
+export const diagnosticCodes = [
+  "PHPMYADMIN_RESPONSE_SHAPE",
+  "PHPMYADMIN_MISSING_LINK",
+  "PHPMYADMIN_AMBIGUOUS_LINK",
+  "PHPMYADMIN_INVALID_PROTOCOL",
+  "PHPMYADMIN_INVALID_HOST",
+  "PHPMYADMIN_URL_CREDENTIALS",
+  "PHPMYADMIN_INVALID_PORT",
+  "PHPMYADMIN_FRAGMENT",
+  "PHPMYADMIN_MALFORMED_URL",
+  "PHPMYADMIN_UPSTREAM",
+  "PHPMYADMIN_LIVE_VERIFICATION",
+] as const;
+
+export type DiagnosticCode = (typeof diagnosticCodes)[number];
+
+export function isDiagnosticCode(
+  value: unknown,
+): value is DiagnosticCode {
+  return (
+    typeof value === "string" &&
+    diagnosticCodes.includes(value as DiagnosticCode)
+  );
+}
+
 export class AppError extends Error {
   constructor(
     public readonly code: AppErrorCode,
@@ -18,6 +43,7 @@ export class AppError extends Error {
     public readonly correlationId?: string,
     public readonly referenceId?: string,
     public readonly retryAfterSeconds?: number,
+    public readonly diagnosticCode?: DiagnosticCode,
   ) {
     super(message);
     this.name = "AppError";

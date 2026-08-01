@@ -692,7 +692,9 @@ describe("site-confined database service", () => {
         phase: "database_phpmyadmin",
         result: "success",
         responseShape: "data_wrapper",
+        referenceId: result.referenceId,
       });
+      expect(phpMyAdminDiagnostics(consoleError)).toHaveLength(1);
       expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
         /auth-db|hostinger\.com|sid=|u123_shop|example\.com/i,
       );
@@ -720,6 +722,16 @@ describe("site-confined database service", () => {
             "corr-safe",
             failureKind === "invalid_host_boundary"
               ? "direct"
+              : "unknown",
+            failureKind === "response_shape"
+              ? {
+                  payloadKind: "array",
+                  hasDirectLink: false,
+                  hasData: false,
+                  dataKind: "other",
+                  hasWrappedLink: false,
+                  responseShape: "unknown",
+                }
               : undefined,
           );
         }),
@@ -734,13 +746,29 @@ describe("site-confined database service", () => {
       ).rejects.toMatchObject({
         status: 502,
         referenceId: "abcdef123456",
+        diagnosticCode:
+          failureKind === "response_shape"
+            ? "PHPMYADMIN_RESPONSE_SHAPE"
+            : "PHPMYADMIN_INVALID_HOST",
       });
 
-      expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
+      const diagnostics = phpMyAdminDiagnostics(consoleError);
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]).toMatchObject({
         referenceId: "abcdef123456",
         phase: "database_phpmyadmin",
         failureKind,
       });
+      if (failureKind === "response_shape") {
+        expect(diagnostics[0]).toMatchObject({
+          payloadKind: "array",
+          hasDirectLink: false,
+          hasData: false,
+          dataKind: "other",
+          hasWrappedLink: false,
+          responseShape: "unknown",
+        });
+      }
       expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
         /auth-db|hostinger\.com|signon|sid=|u123_shop|example\.com/i,
       );
@@ -778,6 +806,91 @@ describe("site-confined database service", () => {
     expect(consoleError.mock.calls.at(-1)?.[1]).toMatchObject({
       phase: "database_phpmyadmin",
       failureKind: "live_verification",
+    });
+    expect(phpMyAdminDiagnostics(consoleError)).toHaveLength(1);
+    consoleError.mockRestore();
+  });
+
+  it("emits one success diagnostic even when audit persistence fails", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const failingAudit = vi.fn(async () => {
+      throw new Error("audit storage unavailable");
+    });
+    const temporaryLink =
+      "https://auth-db123.hostinger.com/signon.php?user=value&password=value";
+
+    await expect(
+      getPhpMyAdminLinkForSite(
+        context("MEMBER"),
+        databaseId,
+        successfulMutationDependencies(
+          {
+            listDatabases: vi.fn(async () => page([liveDatabase])),
+            getDatabasePhpMyAdminLink: vi.fn(async () => ({
+              link: temporaryLink,
+              responseShape: "direct" as const,
+              correlationId: "corr-safe",
+            })),
+          },
+          { audit: failingAudit },
+        ),
+      ),
+    ).resolves.toEqual({
+      link: temporaryLink,
+      referenceId: "abcdef123456",
+    });
+    expect(failingAudit).toHaveBeenCalledTimes(1);
+    expect(phpMyAdminDiagnostics(consoleError)).toHaveLength(1);
+    expect(phpMyAdminDiagnostics(consoleError)[0]).toMatchObject({
+      result: "success",
+      referenceId: "abcdef123456",
+    });
+    expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
+      /auth-db|hostinger\.com|user=value|password=value|signature=/i,
+    );
+    expect(JSON.stringify(failingAudit.mock.calls)).not.toMatch(
+      /auth-db|hostinger\.com|user=value|password=value|signature=/i,
+    );
+    consoleError.mockRestore();
+  });
+
+  it("keeps the same reference and final diagnostic if controlled-error construction fails", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const client = {
+      listDatabases: vi.fn(async () => page([liveDatabase])),
+      getDatabasePhpMyAdminLink: vi.fn(async () => {
+        throw new PhpMyAdminLinkError(
+          "invalid_protocol",
+          "corr-safe",
+          "direct",
+        );
+      }),
+    };
+
+    const promise = getPhpMyAdminLinkForSite(
+      context("ADMIN"),
+      databaseId,
+      successfulMutationDependencies(client, {
+        createPhpMyAdminError: () => {
+          throw new Error("controlled error factory unavailable");
+        },
+      }),
+    );
+
+    await expect(promise).rejects.toMatchObject({
+      referenceId: "abcdef123456",
+      diagnosticCode: "PHPMYADMIN_INVALID_PROTOCOL",
+    });
+    const diagnostics = phpMyAdminDiagnostics(consoleError);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toMatchObject({
+      referenceId: "abcdef123456",
+      result: "failure",
+      failureKind: "invalid_protocol",
     });
     consoleError.mockRestore();
   });
@@ -919,4 +1032,19 @@ function successfulMutationDependencies(
     sleep: vi.fn(async () => undefined),
     ...overrides,
   };
+}
+
+function phpMyAdminDiagnostics(
+  consoleError: { mock: { calls: unknown[][] } },
+) {
+  return consoleError.mock.calls
+    .filter(
+      (call: unknown[]) =>
+        call[0] === "hostinger_operation_diagnostic" &&
+        typeof call[1] === "object" &&
+        call[1] !== null &&
+        "phase" in call[1] &&
+        call[1].phase === "database_phpmyadmin",
+    )
+    .map((call: unknown[]) => call[1]);
 }

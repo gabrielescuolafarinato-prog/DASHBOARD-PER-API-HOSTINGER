@@ -1,10 +1,13 @@
 import "server-only";
 import { randomBytes } from "node:crypto";
 import {
+  phpMyAdminDiagnosticResponseShapes,
   phpMyAdminFailureKinds,
-  phpMyAdminResponseShapes,
+  phpMyAdminPayloadKinds,
   type PhpMyAdminFailureKind,
-  type PhpMyAdminResponseShape,
+  type PhpMyAdminDiagnosticResponseShape,
+  type PhpMyAdminPayloadKind,
+  type PhpMyAdminPayloadStructure,
 } from "./phpmyadmin-link";
 
 export const hostingerDiagnosticPhases = [
@@ -42,7 +45,12 @@ export type HostingerOperationDiagnostic = {
   result: "success" | "failure" | "denied" | "accepted";
   durationBucket: "<250ms" | "<1s" | "<3s" | "<10s" | ">=10s";
   failureKind?: PhpMyAdminFailureKind;
-  responseShape?: PhpMyAdminResponseShape;
+  responseShape?: PhpMyAdminDiagnosticResponseShape;
+  payloadKind?: PhpMyAdminPayloadKind;
+  hasDirectLink?: boolean;
+  hasData?: boolean;
+  dataKind?: PhpMyAdminPayloadKind;
+  hasWrappedLink?: boolean;
 };
 
 export function createDiagnosticReferenceId() {
@@ -60,40 +68,106 @@ export function reportHostingerOperationDiagnostic(input: {
   startedAt?: number;
   forbiddenValues?: unknown[];
   failureKind?: PhpMyAdminFailureKind;
-  responseShape?: PhpMyAdminResponseShape;
+  responseShape?: PhpMyAdminDiagnosticResponseShape;
+  payloadStructure?: PhpMyAdminPayloadStructure;
 }) {
-  const diagnostic: HostingerOperationDiagnostic = {
-    referenceId:
-      typeof input.referenceId === "string" &&
-      /^[a-f0-9]{12}$/.test(input.referenceId)
-        ? input.referenceId
-        : createDiagnosticReferenceId(),
-    phase: input.phase,
-    upstreamStatus: safeStatus(input.upstreamStatus),
-    operationType: safeOperationType(input.operationType),
-    idempotencyStatus: input.idempotencyStatus,
-    result: input.result,
-    durationBucket: durationBucket(input.startedAt),
+  let referenceId = "000000000000";
+  let fallbackDiagnostic: HostingerOperationDiagnostic = {
+    referenceId,
+    phase: "database_phpmyadmin",
+    upstreamStatus: 502,
+    operationType: "database.phpmyadmin.link",
+    idempotencyStatus: "not_applicable",
+    result: "failure",
+    durationBucket: "<250ms",
   };
-  const correlationId = sanitizeCorrelationId(
-    input.correlationId,
-    input.forbiddenValues,
-  );
-  if (correlationId) diagnostic.correlationId = correlationId;
-  if (
-    input.failureKind &&
-    phpMyAdminFailureKinds.includes(input.failureKind)
-  ) {
-    diagnostic.failureKind = input.failureKind;
+  try {
+    referenceId = safeReferenceId(input.referenceId);
+    fallbackDiagnostic = {
+      referenceId,
+      phase: input.phase,
+      upstreamStatus: safeStatus(input.upstreamStatus),
+      operationType: safeOperationType(input.operationType),
+      idempotencyStatus: input.idempotencyStatus,
+      result: input.result,
+      durationBucket: durationBucket(input.startedAt),
+    };
+    const diagnostic = { ...fallbackDiagnostic };
+    let correlationId: string | undefined;
+    try {
+      correlationId = sanitizeCorrelationId(
+        input.correlationId,
+        input.forbiddenValues,
+      );
+    } catch {
+      correlationId = undefined;
+    }
+    if (correlationId) diagnostic.correlationId = correlationId;
+    if (
+      input.failureKind &&
+      phpMyAdminFailureKinds.includes(input.failureKind)
+    ) {
+      diagnostic.failureKind = input.failureKind;
+    }
+    if (
+      input.responseShape &&
+      phpMyAdminDiagnosticResponseShapes.includes(input.responseShape)
+    ) {
+      diagnostic.responseShape = input.responseShape;
+    }
+    appendPayloadStructure(diagnostic, input.payloadStructure);
+    try {
+      console.error("hostinger_operation_diagnostic", diagnostic);
+    } catch {
+      // Diagnostics must never alter the application response.
+    }
+  } catch {
+    try {
+      console.error(
+        "hostinger_operation_diagnostic",
+        fallbackDiagnostic,
+      );
+    } catch {
+      // A broken logger is deliberately ignored.
+    }
   }
-  if (
-    input.responseShape &&
-    phpMyAdminResponseShapes.includes(input.responseShape)
-  ) {
-    diagnostic.responseShape = input.responseShape;
+  return referenceId;
+}
+
+function safeReferenceId(value?: string) {
+  if (typeof value === "string" && /^[a-f0-9]{12}$/.test(value)) {
+    return value;
   }
-  console.error("hostinger_operation_diagnostic", diagnostic);
-  return diagnostic.referenceId;
+  try {
+    return createDiagnosticReferenceId();
+  } catch {
+    return "000000000000";
+  }
+}
+
+function appendPayloadStructure(
+  diagnostic: HostingerOperationDiagnostic,
+  structure?: PhpMyAdminPayloadStructure,
+) {
+  if (!structure) return;
+  if (
+    !phpMyAdminPayloadKinds.includes(structure.payloadKind) ||
+    !phpMyAdminPayloadKinds.includes(structure.dataKind) ||
+    !phpMyAdminDiagnosticResponseShapes.includes(
+      structure.responseShape,
+    ) ||
+    typeof structure.hasDirectLink !== "boolean" ||
+    typeof structure.hasData !== "boolean" ||
+    typeof structure.hasWrappedLink !== "boolean"
+  ) {
+    return;
+  }
+  diagnostic.payloadKind = structure.payloadKind;
+  diagnostic.hasDirectLink = structure.hasDirectLink;
+  diagnostic.hasData = structure.hasData;
+  diagnostic.dataKind = structure.dataKind;
+  diagnostic.hasWrappedLink = structure.hasWrappedLink;
+  diagnostic.responseShape = structure.responseShape;
 }
 
 function safeStatus(value?: number) {

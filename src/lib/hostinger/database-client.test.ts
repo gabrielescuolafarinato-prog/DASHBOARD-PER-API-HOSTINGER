@@ -640,11 +640,13 @@ describe("Hostinger database client", () => {
     expect(() =>
       validatePhpMyAdminLink("https://user:secret@db.hostinger.com/signon"),
     ).toThrow();
-    expect(() =>
+    expect(
       validatePhpMyAdminLink(
         "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
       ),
-    ).toThrow();
+    ).toBe(
+      "https://auth-db123.hostinger.com/signon?username=u1&password=secret",
+    );
   });
 
   it("accepts only the bounded data wrapper for a phpMyAdmin link", async () => {
@@ -728,6 +730,15 @@ describe("Hostinger database client", () => {
       status: 502,
       failureKind: "response_shape",
       correlationId: "corr-db",
+      diagnosticCode: "PHPMYADMIN_RESPONSE_SHAPE",
+      payloadStructure: {
+        payloadKind: "string",
+        hasDirectLink: false,
+        hasData: false,
+        dataKind: "other",
+        hasWrappedLink: false,
+        responseShape: "unknown",
+      },
     });
     await expect(
       client.getDatabasePhpMyAdminLink("u1", "u1_shop"),
@@ -753,6 +764,15 @@ describe("Hostinger database client", () => {
     ).rejects.toMatchObject({
       status: 502,
       failureKind: "missing_link",
+      diagnosticCode: "PHPMYADMIN_MISSING_LINK",
+      payloadStructure: {
+        payloadKind: "null",
+        hasDirectLink: false,
+        hasData: false,
+        dataKind: "other",
+        hasWrappedLink: false,
+        responseShape: "unknown",
+      },
     });
   });
 

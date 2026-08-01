@@ -74,6 +74,8 @@ describe("GET /api/databases/[id]/phpmyadmin", () => {
         502,
         "corr-private",
         referenceId,
+        undefined,
+        "PHPMYADMIN_INVALID_HOST",
       ),
     );
 
@@ -87,6 +89,7 @@ describe("GET /api/databases/[id]/phpmyadmin", () => {
         message:
           "Hostinger returned an invalid phpMyAdmin link response.",
         referenceId,
+        diagnosticCode: "PHPMYADMIN_INVALID_HOST",
       },
     });
   });

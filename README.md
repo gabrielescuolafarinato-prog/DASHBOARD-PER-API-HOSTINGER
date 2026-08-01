@@ -517,10 +517,13 @@ compatibilità l'envelope `{ "data": { "link": "..." } }`, già usato da altri
 endpoint Hostinger. Non effettua ricerche ricorsive: link assenti, non stringa,
 troppo lunghi o diversi nelle due forme vengono rifiutati.
 
-La URL temporanea è accettata soltanto con HTTPS, senza credenziali, fragment,
-caratteri di controllo o porta diversa da 443 e con hostname sotto il confine
-DNS esatto `.hostinger.com`; il dominio radice e suffissi ingannevoli come
-`hostinger.com.evil.example` sono negati. La risposta applicativa usa
+La URL temporanea è accettata soltanto con HTTPS, senza credenziali nella
+authority (`username:password@host`), fragment, caratteri di controllo o porta
+diversa da 443 e con hostname sotto il confine DNS esatto `.hostinger.com`; il
+dominio radice e suffissi ingannevoli come `hostinger.com.evil.example` sono
+negati. La query string firmata da Hostinger è trattata come opaca, resta
+inalterata e non viene interpretata in base ai nomi dei parametri. La risposta
+applicativa usa
 `Cache-Control: private, no-store`, `Pragma: no-cache`,
 `Referrer-Policy: no-referrer` e `X-Content-Type-Options: nosniff`. Dopo la
 generazione la UI mostra un'azione utente esplicita **Open phpMyAdmin** con
@@ -529,11 +532,14 @@ scheda `about:blank`. Il link resta soltanto nello stato React transiente,
 scade dopo 60 secondi e viene rimosso al click; non viene inserito in database,
 storage browser, URL della dashboard, log o audit.
 
-La diagnostica `database_phpmyadmin` distingue con categorie statiche la
+La diagnostica finale `database_phpmyadmin`, emessa una sola volta per
+richiesta, distingue con categorie statiche la
 verifica live, gli errori HTTP upstream, la forma risposta, link mancante o
-ambiguo e i singoli confini URL; può indicare soltanto `direct` o
-`data_wrapper`. Non registra link, hostname, path, query, payload, database,
-utenti o dominio. Le regole remote vengono incrociate con l'elenco live dei
+ambiguo e i singoli confini URL; può indicare soltanto forme e caratteristiche
+strutturali allowlistate, mai chiavi o valori del payload. Lo stesso reference
+ID è restituito con un `diagnosticCode` statico allowlistato e mostrato dalla
+UI. Non registra link, hostname, path, query, payload, database, utenti o
+dominio. Le regole remote vengono incrociate con l'elenco live dei
 database autorizzati; sono ammesse nelle mutazioni soltanto IPv4 o IPv6
 specifiche. `%`, wildcard, hostname e CIDR vengono rifiutati.
 

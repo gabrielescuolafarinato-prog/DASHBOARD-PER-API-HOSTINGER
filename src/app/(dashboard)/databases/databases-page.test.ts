@@ -77,8 +77,12 @@ describe("database dashboard surface", () => {
   it("shows a controlled failure and reference without creating a window", () => {
     expect(manager).toContain("failure?.referenceId");
     expect(manager).toContain(
-      "The phpMyAdmin link could not be generated.",
+      "Hostinger returned an invalid phpMyAdmin link response.",
     );
+    expect(manager).toContain(
+      "isDiagnosticCode(failure?.diagnosticCode)",
+    );
+    expect(manager).toContain("Diagnostic: {notice.diagnosticCode}");
     expect(manager).not.toContain("target?.close()");
   });
 

@@ -107,6 +107,18 @@ describe("phpMyAdmin temporary URL validation", () => {
   });
 
   it.each([
+    "https://auth-db123.hostinger.com/signon.php?sid=abc123",
+    "https://auth-db123.hostinger.com/signon.php?user=value",
+    "https://auth-db123.hostinger.com/signon.php?username=value",
+    "https://auth-db123.hostinger.com/signon.php?password=value",
+    "https://auth-db123.hostinger.com/signon.php?user=a&password=b&signature=c",
+  ])("treats the Hostinger query as opaque: %s", (value) => {
+    expect(validatePhpMyAdminLink(value)).toBe(
+      new URL(value).toString(),
+    );
+  });
+
+  it.each([
     [
       "https://hostinger.com.evil.example/signon",
       "invalid_host_boundary",
@@ -121,6 +133,10 @@ describe("phpMyAdmin temporary URL validation", () => {
       "invalid_protocol",
     ],
     [
+      "https://user@auth-db123.hostinger.com/signon",
+      "credentials_present",
+    ],
+    [
       "https://user:secret@auth-db123.hostinger.com/signon",
       "credentials_present",
     ],
@@ -132,10 +148,7 @@ describe("phpMyAdmin temporary URL validation", () => {
       "https://auth-db123.hostinger.com/signon#temporary",
       "fragment_present",
     ],
-    [
-      "https://auth-db123.hostinger.com/signon?username=u123",
-      "credentials_present",
-    ],
+    ["/signon.php?sid=abc123", "malformed_url"],
     ["not a url", "malformed_url"],
     [
       "https://auth-db123.hostinger.com/signon\n",
@@ -150,6 +163,16 @@ describe("phpMyAdmin temporary URL validation", () => {
       );
     },
   );
+
+  it("rejects an overlong URL before parsing it", () => {
+    expectFailure(
+      () =>
+        validatePhpMyAdminLink(
+          `https://auth-db123.hostinger.com/signon.php?sid=${"a".repeat(4_096)}`,
+        ),
+      "malformed_url",
+    );
+  });
 });
 
 function expectFailure(

@@ -60,6 +60,17 @@ describe("Hostinger operation diagnostics", () => {
         result: "failure",
         failureKind,
         responseShape,
+        payloadStructure:
+          failureKind === "response_shape"
+            ? {
+                payloadKind: "object",
+                hasDirectLink: true,
+                hasData: false,
+                dataKind: "other",
+                hasWrappedLink: false,
+                responseShape: "direct",
+              }
+            : undefined,
         forbiddenValues: [
           "auth-db123.hostinger.com",
           "https://auth-db123.hostinger.com/signon.php?sid=private",
@@ -77,6 +88,15 @@ describe("Hostinger operation diagnostics", () => {
         durationBucket: "<250ms",
         failureKind,
         responseShape,
+        ...(failureKind === "response_shape"
+          ? {
+              payloadKind: "object",
+              hasDirectLink: true,
+              hasData: false,
+              dataKind: "other",
+              hasWrappedLink: false,
+            }
+          : {}),
       });
       expect(JSON.stringify(consoleError.mock.calls)).not.toMatch(
         /auth-db|hostinger\.com|signon|sid=|u123_shop/i,
@@ -84,4 +104,83 @@ describe("Hostinger operation diagnostics", () => {
       consoleError.mockRestore();
     },
   );
+
+  it("never propagates a reporter exception", () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {
+        throw new Error("logger unavailable");
+      });
+
+    expect(() =>
+      reportHostingerOperationDiagnostic({
+        referenceId: "abcdef123456",
+        phase: "database_phpmyadmin",
+        upstreamStatus: 502,
+        operationType: "database.phpmyadmin.link",
+        idempotencyStatus: "not_applicable",
+        result: "failure",
+        failureKind: "response_shape",
+      }),
+    ).not.toThrow();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
+  });
+
+  it("drops unsafe correlation data when sanitization itself fails", () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const forbiddenValues = new Proxy([] as unknown[], {
+      get() {
+        throw new Error("sanitizer input unavailable");
+      },
+    });
+
+    expect(() =>
+      reportHostingerOperationDiagnostic({
+        referenceId: "abcdef123456",
+        phase: "database_phpmyadmin",
+        upstreamStatus: 502,
+        correlationId: "must-not-escape",
+        operationType: "database.phpmyadmin.link",
+        idempotencyStatus: "not_applicable",
+        result: "failure",
+        forbiddenValues,
+      }),
+    ).not.toThrow();
+    expect(consoleError).toHaveBeenCalledWith(
+      "hostinger_operation_diagnostic",
+      expect.not.objectContaining({ correlationId: expect.anything() }),
+    );
+    expect(JSON.stringify(consoleError.mock.calls)).not.toContain(
+      "must-not-escape",
+    );
+    consoleError.mockRestore();
+  });
+
+  it("does not throw when diagnostic object construction encounters hostile input", () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const hostileInput = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("property unavailable");
+        },
+      },
+    );
+
+    expect(() =>
+      reportHostingerOperationDiagnostic(hostileInput as never),
+    ).not.toThrow();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(consoleError.mock.calls[0][1]).toMatchObject({
+      referenceId: "000000000000",
+      phase: "database_phpmyadmin",
+      result: "failure",
+    });
+    consoleError.mockRestore();
+  });
 });

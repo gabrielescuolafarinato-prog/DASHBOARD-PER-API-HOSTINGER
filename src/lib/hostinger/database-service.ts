@@ -13,7 +13,13 @@ import {
   type HostingerDatabasePage,
   type HostingerDatabaseSummary,
 } from "./client";
-import { PhpMyAdminLinkError } from "./phpmyadmin-link";
+import {
+  phpMyAdminDiagnosticCode,
+  PhpMyAdminLinkError,
+  type PhpMyAdminFailureKind,
+  type PhpMyAdminPayloadStructure,
+  type PhpMyAdminDiagnosticResponseShape,
+} from "./phpmyadmin-link";
 import type {
   ChangeDatabasePasswordInput,
   CreateDatabaseInput,
@@ -97,6 +103,12 @@ type DatabaseServiceDependencies = {
   findOperation?: typeof getHostingerOperationByIdempotency;
   audit?: typeof writeAuditEvent;
   createReferenceId?: () => string;
+  createPhpMyAdminError?: (
+    error: unknown,
+    referenceId: string,
+    failureKind: PhpMyAdminFailureKind,
+    correlationId?: string,
+  ) => AppError;
   sleep?: (milliseconds: number) => Promise<void>;
 };
 
@@ -539,20 +551,30 @@ export async function getPhpMyAdminLinkForSite(
   dependencies: DatabaseServiceDependencies = {},
 ) {
   const capability = "database.phpmyadmin.link" as const;
-  assertHostingerSiteAccess(current.site.membershipRole, capability);
-  const binding = await requireBinding(
-    current,
-    databaseId,
-    dependencies,
-    capability,
-  );
-  const client = dependencies.client ?? createHostingerClient();
   const startedAt = Date.now();
   const referenceId =
     dependencies.createReferenceId?.() ??
     createDiagnosticReferenceId();
+  let binding: SiteDatabaseRecord | undefined;
   let liveVerificationComplete = false;
+  let finalStatus = 502;
+  let finalCorrelationId: string | undefined;
+  let finalResult: "success" | "failure" = "failure";
+  let finalFailureKind: PhpMyAdminFailureKind | undefined =
+    "live_verification";
+  let finalResponseShape:
+    | PhpMyAdminDiagnosticResponseShape
+    | undefined;
+  let finalPayloadStructure: PhpMyAdminPayloadStructure | undefined;
   try {
+    assertHostingerSiteAccess(current.site.membershipRole, capability);
+    binding = await requireBinding(
+      current,
+      databaseId,
+      dependencies,
+      capability,
+    );
+    const client = dependencies.client ?? createHostingerClient();
     await verifyLiveBinding(current, binding, client, dependencies);
     liveVerificationComplete = true;
     const result = await client.getDatabasePhpMyAdminLink(
@@ -571,83 +593,101 @@ export async function getPhpMyAdminLinkForSite(
         correlationId: safeCorrelationId(result.correlationId, current),
       },
     });
-    reportHostingerOperationDiagnostic({
-      referenceId,
-      phase: "database_phpmyadmin",
-      upstreamStatus: 200,
-      correlationId: result.correlationId,
-      operationType: "database.phpmyadmin.link",
-      idempotencyStatus: "not_applicable",
-      result: "success",
-      startedAt,
-      responseShape: result.responseShape,
-      forbiddenValues: [
-        current.site.hostingerUsername,
-        current.site.primaryDomain,
-        binding.name,
-        binding.user,
-        result.link,
-      ],
-    });
+    finalStatus = 200;
+    finalCorrelationId = result.correlationId;
+    finalResult = "success";
+    finalFailureKind = undefined;
+    finalResponseShape = result.responseShape;
     return { link: result.link, referenceId };
   } catch (error) {
-    await auditHostingerFailure(
-      dependencies.audit ?? writeAuditEvent,
-      current,
-      "database_phpmyadmin_link",
-      error,
-      binding.id,
-    );
-    const controlled =
-      error instanceof AppError
-        ? new AppError(
-            error.code,
-            error.message,
-            error.status,
-            safeCorrelationId(
-              error.correlationId,
-              current,
-              binding.name,
-            ),
-            referenceId,
-            error.retryAfterSeconds,
-          )
-        : new AppError(
-            "HOSTINGER_ERROR",
-            "The phpMyAdmin link could not be generated.",
-            503,
-            undefined,
-            referenceId,
-          );
     const failureKind = !liveVerificationComplete
       ? "live_verification"
       : error instanceof PhpMyAdminLinkError
         ? error.failureKind
         : "upstream_http";
-    const responseShape =
+    finalFailureKind = failureKind;
+    finalResponseShape =
       error instanceof PhpMyAdminLinkError
         ? error.responseShape
         : undefined;
+    finalPayloadStructure =
+      error instanceof PhpMyAdminLinkError
+        ? error.payloadStructure
+        : undefined;
+    const correlationId = safeCorrelationId(
+      error instanceof AppError ? error.correlationId : undefined,
+      current,
+      binding?.name,
+    );
+    let controlled: AppError;
+    try {
+      controlled = (
+        dependencies.createPhpMyAdminError ??
+        createControlledPhpMyAdminError
+      )(error, referenceId, failureKind, correlationId);
+    } catch {
+      controlled = new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger returned an invalid phpMyAdmin link response.",
+        503,
+        correlationId,
+        referenceId,
+        undefined,
+        phpMyAdminDiagnosticCode(failureKind),
+      );
+    }
+    finalStatus = controlled.status;
+    finalCorrelationId = controlled.correlationId;
+    try {
+      await auditHostingerFailure(
+        dependencies.audit ?? writeAuditEvent,
+        current,
+        "database_phpmyadmin_link",
+        controlled,
+        binding?.id,
+      );
+    } catch {
+      // Audit must not suppress the controlled response or final diagnostic.
+    }
+    throw controlled;
+  } finally {
     reportHostingerOperationDiagnostic({
       referenceId,
       phase: "database_phpmyadmin",
-      upstreamStatus: controlled.status,
-      correlationId: controlled.correlationId,
+      upstreamStatus: finalStatus,
+      correlationId: finalCorrelationId,
       operationType: "database.phpmyadmin.link",
       idempotencyStatus: "not_applicable",
-      result: "failure",
+      result: finalResult,
       startedAt,
-      failureKind,
-      responseShape,
+      failureKind: finalFailureKind,
+      responseShape: finalResponseShape,
+      payloadStructure: finalPayloadStructure,
       forbiddenValues: [
         current.site.hostingerUsername,
         current.site.primaryDomain,
-        binding.name,
-        binding.user,
+        binding?.name,
+        binding?.user,
       ],
     });
-    throw controlled;
   }
+}
+
+function createControlledPhpMyAdminError(
+  error: unknown,
+  referenceId: string,
+  failureKind: PhpMyAdminFailureKind,
+  correlationId?: string,
+) {
+  return new AppError(
+    error instanceof AppError ? error.code : "HOSTINGER_ERROR",
+    "Hostinger returned an invalid phpMyAdmin link response.",
+    error instanceof AppError ? error.status : 503,
+    correlationId,
+    referenceId,
+    error instanceof AppError ? error.retryAfterSeconds : undefined,
+    phpMyAdminDiagnosticCode(failureKind),
+  );
 }
 
 export async function listRemoteConnectionsForSite(

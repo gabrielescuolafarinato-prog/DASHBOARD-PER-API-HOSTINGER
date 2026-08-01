@@ -72,6 +72,51 @@ describe("controlled build API errors", () => {
     });
   });
 
+  it("returns an allowlisted phpMyAdmin diagnostic code", async () => {
+    const response = apiFailure(
+      new AppError(
+        "HOSTINGER_ERROR",
+        "Hostinger returned an invalid phpMyAdmin link response.",
+        502,
+        "corr-private",
+        "a1b2c3d4e5f6",
+        undefined,
+        "PHPMYADMIN_INVALID_HOST",
+      ),
+    );
+
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "HOSTINGER_ERROR",
+        message:
+          "Hostinger returned an invalid phpMyAdmin link response.",
+        referenceId: "a1b2c3d4e5f6",
+        diagnosticCode: "PHPMYADMIN_INVALID_HOST",
+      },
+    });
+  });
+
+  it("does not expose a diagnostic code outside the static allowlist", async () => {
+    const error = new AppError(
+      "HOSTINGER_ERROR",
+      "Controlled message",
+      502,
+    );
+    Object.defineProperty(error, "diagnosticCode", {
+      value: "RAW_UPSTREAM_VALUE",
+    });
+
+    const body = await apiFailure(error).json();
+    expect(body).toEqual({
+      ok: false,
+      error: {
+        code: "HOSTINGER_ERROR",
+        message: "Controlled message",
+      },
+    });
+  });
+
   it("does not expose an invalid reference ID", async () => {
     const response = apiFailure(
       new AppError(

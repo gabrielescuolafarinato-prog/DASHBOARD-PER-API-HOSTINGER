@@ -1,9 +1,10 @@
-import { AppError } from "@/lib/errors";
+import {
+  AppError,
+  type DiagnosticCode,
+} from "@/lib/errors";
 
 const MAX_PHPMYADMIN_LINK_LENGTH = 4_096;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
-const CREDENTIAL_QUERY_KEY_PATTERN =
-  /(?:^|[_-])(?:user(?:name)?|password|pass|pwd)(?:$|[_-])/i;
 
 export const phpMyAdminFailureKinds = [
   "response_shape",
@@ -30,17 +31,69 @@ export const phpMyAdminResponseShapes = [
 export type PhpMyAdminResponseShape =
   (typeof phpMyAdminResponseShapes)[number];
 
+export const phpMyAdminDiagnosticResponseShapes = [
+  ...phpMyAdminResponseShapes,
+  "unknown",
+] as const;
+
+export type PhpMyAdminDiagnosticResponseShape =
+  (typeof phpMyAdminDiagnosticResponseShapes)[number];
+
+export const phpMyAdminPayloadKinds = [
+  "object",
+  "array",
+  "string",
+  "null",
+  "other",
+] as const;
+
+export type PhpMyAdminPayloadKind =
+  (typeof phpMyAdminPayloadKinds)[number];
+
+export type PhpMyAdminPayloadStructure = {
+  payloadKind: PhpMyAdminPayloadKind;
+  hasDirectLink: boolean;
+  hasData: boolean;
+  dataKind: PhpMyAdminPayloadKind;
+  hasWrappedLink: boolean;
+  responseShape: PhpMyAdminDiagnosticResponseShape;
+};
+
+const diagnosticCodeByFailureKind = {
+  response_shape: "PHPMYADMIN_RESPONSE_SHAPE",
+  missing_link: "PHPMYADMIN_MISSING_LINK",
+  ambiguous_link: "PHPMYADMIN_AMBIGUOUS_LINK",
+  invalid_protocol: "PHPMYADMIN_INVALID_PROTOCOL",
+  invalid_host_boundary: "PHPMYADMIN_INVALID_HOST",
+  credentials_present: "PHPMYADMIN_URL_CREDENTIALS",
+  invalid_port: "PHPMYADMIN_INVALID_PORT",
+  fragment_present: "PHPMYADMIN_FRAGMENT",
+  malformed_url: "PHPMYADMIN_MALFORMED_URL",
+  upstream_http: "PHPMYADMIN_UPSTREAM",
+  live_verification: "PHPMYADMIN_LIVE_VERIFICATION",
+} satisfies Record<PhpMyAdminFailureKind, DiagnosticCode>;
+
+export function phpMyAdminDiagnosticCode(
+  failureKind: PhpMyAdminFailureKind,
+) {
+  return diagnosticCodeByFailureKind[failureKind];
+}
+
 export class PhpMyAdminLinkError extends AppError {
   constructor(
     public readonly failureKind: PhpMyAdminFailureKind,
     correlationId?: string,
-    public readonly responseShape?: PhpMyAdminResponseShape,
+    public readonly responseShape?: PhpMyAdminDiagnosticResponseShape,
+    public readonly payloadStructure?: PhpMyAdminPayloadStructure,
   ) {
     super(
       "HOSTINGER_ERROR",
       "Hostinger returned an invalid phpMyAdmin link response.",
       502,
       correlationId,
+      undefined,
+      undefined,
+      phpMyAdminDiagnosticCode(failureKind),
     );
     this.name = "PhpMyAdminLinkError";
   }
@@ -50,10 +103,13 @@ export function decodePhpMyAdminLink(
   payload: unknown,
   correlationId?: string,
 ) {
+  const structure = describePhpMyAdminPayload(payload);
   if (!isRecord(payload)) {
     throw new PhpMyAdminLinkError(
       payload === null ? "missing_link" : "response_shape",
       correlationId,
+      structure.responseShape,
+      structure,
     );
   }
 
@@ -63,10 +119,10 @@ export function decodePhpMyAdminLink(
     isRecord(data) && Object.hasOwn(data, "link");
 
   const directLink = hasDirect
-    ? readLink(payload.link, correlationId)
+    ? readLink(payload.link, correlationId, structure)
     : undefined;
   const wrappedLink = hasWrapped
-    ? readLink(data.link, correlationId)
+    ? readLink(data.link, correlationId, structure)
     : undefined;
 
   if (
@@ -77,6 +133,8 @@ export function decodePhpMyAdminLink(
     throw new PhpMyAdminLinkError(
       "ambiguous_link",
       correlationId,
+      "unknown",
+      { ...structure, responseShape: "unknown" },
     );
   }
   if (directLink !== undefined) {
@@ -99,9 +157,16 @@ export function decodePhpMyAdminLink(
     throw new PhpMyAdminLinkError(
       "response_shape",
       correlationId,
+      structure.responseShape,
+      structure,
     );
   }
-  throw new PhpMyAdminLinkError("missing_link", correlationId);
+  throw new PhpMyAdminLinkError(
+    "missing_link",
+    correlationId,
+    structure.responseShape,
+    structure,
+  );
 }
 
 export function validatePhpMyAdminLink(
@@ -172,21 +237,42 @@ export function validatePhpMyAdminLink(
       responseShape,
     );
   }
-  if (
-    [...link.searchParams.keys()].some((key) =>
-      CREDENTIAL_QUERY_KEY_PATTERN.test(key),
-    )
-  ) {
-    throw new PhpMyAdminLinkError(
-      "credentials_present",
-      correlationId,
-      responseShape,
-    );
-  }
   return link.toString();
 }
 
-function readLink(value: unknown, correlationId?: string) {
+export function describePhpMyAdminPayload(
+  payload: unknown,
+): PhpMyAdminPayloadStructure {
+  const payloadKind = payloadKindOf(payload);
+  const hasDirectLink =
+    isRecord(payload) && Object.hasOwn(payload, "link");
+  const hasData =
+    isRecord(payload) && Object.hasOwn(payload, "data");
+  const data = hasData && isRecord(payload) ? payload.data : undefined;
+  const dataKind = hasData ? payloadKindOf(data) : "other";
+  const hasWrappedLink =
+    isRecord(data) && Object.hasOwn(data, "link");
+  const responseShape =
+    hasDirectLink && !hasWrappedLink
+      ? "direct"
+      : !hasDirectLink && hasWrappedLink
+        ? "data_wrapper"
+        : "unknown";
+  return {
+    payloadKind,
+    hasDirectLink,
+    hasData,
+    dataKind,
+    hasWrappedLink,
+    responseShape,
+  };
+}
+
+function readLink(
+  value: unknown,
+  correlationId: string | undefined,
+  structure: PhpMyAdminPayloadStructure,
+) {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -195,9 +281,19 @@ function readLink(value: unknown, correlationId?: string) {
     throw new PhpMyAdminLinkError(
       "response_shape",
       correlationId,
+      structure.responseShape,
+      structure,
     );
   }
   return value;
+}
+
+function payloadKindOf(value: unknown): PhpMyAdminPayloadKind {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "string") return "string";
+  if (typeof value === "object") return "object";
+  return "other";
 }
 
 function isRecord(

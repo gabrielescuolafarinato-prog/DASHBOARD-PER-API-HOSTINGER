@@ -47,4 +47,39 @@ describe("Hostinger capability policy", () => {
       category: "SITE_DIRECT",
     });
   });
+
+  it.each([
+    "dns.records.list",
+    "dns.records.create",
+    "dns.records.update",
+    "dns.records.delete",
+    "dns.snapshots.list",
+    "dns.snapshots.view",
+  ])("marks the delivered domain capability %s as implemented", (key) => {
+    expect(getCapability(key)).toMatchObject({
+      state: "IMPLEMENTED",
+      category: "DOMAIN_ASSET",
+    });
+  });
+
+  it.each([
+    "subdomains.list",
+    "subdomains.create",
+    "subdomains.delete",
+    "aliases.list",
+    "aliases.create",
+    "aliases.delete",
+  ])("marks the delivered website-domain capability %s as implemented", (key) => {
+    expect(getCapability(key)).toMatchObject({
+      state: "IMPLEMENTED",
+      category: "SITE_RESOURCE",
+    });
+  });
+
+  it.each(["dns.snapshots.restore", "dns.zone.reset"])(
+    "keeps destructive full-zone capability %s planned and unavailable",
+    (key) => {
+      expect(getCapability(key).state).toBe("PLANNED");
+    },
+  );
 });

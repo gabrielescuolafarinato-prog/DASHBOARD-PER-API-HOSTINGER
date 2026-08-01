@@ -6,6 +6,18 @@ import { reportBuildResponseDiagnostic } from "./build-response-diagnostic";
 import { reportDatabaseRequestDiagnostic } from "./database-request-diagnostic";
 import { normalizeDomain } from "./domain";
 import {
+  decodeAliases,
+  decodeDnsSnapshot,
+  decodeDnsSnapshots,
+  decodeDnsZone,
+  decodeSubdomains,
+  parseSnapshotId,
+} from "./domain-codec";
+import type {
+  DnsRecordGroup,
+  OfficialDnsRecordType,
+} from "./domain-types";
+import {
   vulnerabilitySeverities,
   type VulnerabilitySeverity,
 } from "./vulnerability-constants";
@@ -156,6 +168,26 @@ export type HostingerVulnerabilityPatchResult = {
   correlationId?: string;
 };
 
+export type HostingerDnsZone = ReturnType<typeof decodeDnsZone> & {
+  correlationId?: string;
+};
+
+export type HostingerDnsSnapshotList = ReturnType<
+  typeof decodeDnsSnapshots
+> & { correlationId?: string };
+
+export type HostingerDnsSnapshot = ReturnType<
+  typeof decodeDnsSnapshot
+> & { correlationId?: string };
+
+export type HostingerSubdomainList = ReturnType<
+  typeof decodeSubdomains
+> & { correlationId?: string };
+
+export type HostingerAliasList = ReturnType<typeof decodeAliases> & {
+  correlationId?: string;
+};
+
 type ClientOptions = {
   token: string;
   fetchImpl?: typeof fetch;
@@ -169,7 +201,7 @@ type HostingerResponse = {
   correlationId?: string;
 };
 
-type HostingerMethod = "GET" | "POST" | "PATCH" | "DELETE";
+type HostingerMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 const PAGINATION_DIGITS_PATTERN = /^\d+$/;
 const MAX_BUILD_PAGE = 10_000;
@@ -1355,6 +1387,206 @@ export class HostingerClient {
     };
   }
 
+  async getDnsZone(configuredDomain: string): Promise<HostingerDnsZone> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "GET",
+      `/api/dns/v1/zones/${encodeURIComponent(domain)}`,
+    );
+    return {
+      ...decodeDnsZone(response.payload, domain),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async validateDnsZoneUpdate(
+    configuredDomain: string,
+    zone: DnsRecordGroup[],
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "POST",
+      `/api/dns/v1/zones/${encodeURIComponent(
+        normalizeDomain(configuredDomain),
+      )}/validate`,
+      dnsUpdateBody(zone),
+    );
+  }
+
+  async updateDnsZone(
+    configuredDomain: string,
+    zone: DnsRecordGroup[],
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "PUT",
+      `/api/dns/v1/zones/${encodeURIComponent(
+        normalizeDomain(configuredDomain),
+      )}`,
+      dnsUpdateBody(zone),
+    );
+  }
+
+  async deleteDnsRecordGroups(
+    configuredDomain: string,
+    filters: { name: string; type: OfficialDnsRecordType }[],
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "DELETE",
+      `/api/dns/v1/zones/${encodeURIComponent(
+        normalizeDomain(configuredDomain),
+      )}`,
+      { filters },
+    );
+  }
+
+  async listDnsSnapshots(
+    configuredDomain: string,
+  ): Promise<HostingerDnsSnapshotList> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "GET",
+      `/api/dns/v1/snapshots/${encodeURIComponent(domain)}`,
+    );
+    return {
+      ...decodeDnsSnapshots(response.payload),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async getDnsSnapshot(
+    configuredDomain: string,
+    snapshotId: string,
+  ): Promise<HostingerDnsSnapshot> {
+    const domain = normalizeDomain(configuredDomain);
+    const id = parseSnapshotId(snapshotId);
+    const response = await this.request(
+      "GET",
+      `/api/dns/v1/snapshots/${encodeURIComponent(domain)}/${id}`,
+    );
+    return {
+      ...decodeDnsSnapshot(response.payload, domain),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async listSubdomains(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<HostingerSubdomainList> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "GET",
+      websiteDomainPath(configuredUsername, domain, "/subdomains"),
+    );
+    return {
+      ...decodeSubdomains(response.payload, configuredUsername, domain),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async createSubdomain(
+    configuredUsername: string,
+    configuredDomain: string,
+    input: {
+      subdomain: string;
+      directory?: string;
+      isUsingPublicDirectory?: boolean;
+    },
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "POST",
+      websiteDomainPath(
+        configuredUsername,
+        normalizeDomain(configuredDomain),
+        "/subdomains",
+      ),
+      {
+        subdomain: input.subdomain,
+        ...(input.directory === undefined
+          ? {}
+          : { directory: input.directory }),
+        ...(input.isUsingPublicDirectory === undefined
+          ? {}
+          : { is_using_public_directory: input.isUsingPublicDirectory }),
+      },
+    );
+  }
+
+  async deleteSubdomain(
+    configuredUsername: string,
+    configuredDomain: string,
+    subdomain: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "DELETE",
+      websiteDomainPath(
+        configuredUsername,
+        normalizeDomain(configuredDomain),
+        `/subdomains/${encodeURIComponent(subdomain)}`,
+      ),
+    );
+  }
+
+  async listDomainAliases(
+    configuredUsername: string,
+    configuredDomain: string,
+  ): Promise<HostingerAliasList> {
+    const domain = normalizeDomain(configuredDomain);
+    const response = await this.request(
+      "GET",
+      websiteDomainPath(configuredUsername, domain, "/parked-domains"),
+    );
+    return {
+      ...decodeAliases(response.payload, configuredUsername, domain),
+      correlationId: response.correlationId,
+    };
+  }
+
+  async createDomainAlias(
+    configuredUsername: string,
+    configuredDomain: string,
+    alias: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "POST",
+      websiteDomainPath(
+        configuredUsername,
+        normalizeDomain(configuredDomain),
+        "/parked-domains",
+      ),
+      { parked_domain: alias },
+    );
+  }
+
+  async deleteDomainAlias(
+    configuredUsername: string,
+    configuredDomain: string,
+    alias: string,
+  ): Promise<HostingerMutationResult> {
+    return await this.domainMutation(
+      "DELETE",
+      websiteDomainPath(
+        configuredUsername,
+        normalizeDomain(configuredDomain),
+        `/parked-domains/${encodeURIComponent(alias)}`,
+      ),
+    );
+  }
+
+  private async domainMutation(
+    method: "POST" | "PUT" | "DELETE",
+    path: string,
+    body?: Record<string, unknown>,
+  ): Promise<HostingerMutationResult> {
+    const response = await this.request(method, path, body);
+    if (
+      response.payload !== null &&
+      !hostingerEmptySuccessSchema.safeParse(response.payload).success
+    ) {
+      throw malformedResponse(response.correlationId);
+    }
+    return { accepted: true, correlationId: response.correlationId };
+  }
+
   private async databaseMutation(
     method: "POST" | "PATCH" | "DELETE",
     path: string,
@@ -1399,6 +1631,30 @@ export class HostingerClient {
       correlationId: response.correlationId,
     };
   }
+}
+
+function dnsUpdateBody(zone: DnsRecordGroup[]) {
+  return {
+    overwrite: false,
+    zone: zone.map((group) => ({
+      name: group.name,
+      type: group.type,
+      ...(group.ttl === undefined ? {} : { ttl: group.ttl }),
+      records: group.records.map((record) => ({
+        content: record.content,
+      })),
+    })),
+  };
+}
+
+function websiteDomainPath(
+  configuredUsername: string,
+  configuredDomain: string,
+  suffix: string,
+) {
+  return `/api/hosting/v1/accounts/${encodeURIComponent(
+    configuredUsername,
+  )}/websites/${encodeURIComponent(configuredDomain)}${suffix}`;
 }
 
 function databasePath(

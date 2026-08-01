@@ -25,6 +25,18 @@ export const hostingerDiagnosticPhases = [
   "cacheless_toggle",
   "vulnerability_list",
   "vulnerability_patch",
+  "dns_records_list",
+  "dns_records_create",
+  "dns_records_update",
+  "dns_records_delete",
+  "dns_snapshots_list",
+  "dns_snapshots_view",
+  "subdomains_list",
+  "subdomains_create",
+  "subdomains_delete",
+  "aliases_list",
+  "aliases_create",
+  "aliases_delete",
 ] as const;
 
 export type HostingerDiagnosticPhase =
@@ -43,7 +55,7 @@ export type HostingerOperationDiagnostic = {
     | "blocked"
     | "completed"
     | "failed";
-  result: "success" | "failure" | "denied" | "accepted";
+  result: "success" | "failure" | "denied" | "accepted" | "recovered";
   durationBucket: "<250ms" | "<1s" | "<3s" | "<10s" | ">=10s";
   failureKind?: PhpMyAdminFailureKind;
   responseShape?: PhpMyAdminDiagnosticResponseShape;
@@ -52,6 +64,18 @@ export type HostingerOperationDiagnostic = {
   hasData?: boolean;
   dataKind?: PhpMyAdminPayloadKind;
   hasWrappedLink?: boolean;
+  resourceCategory?: "dns_zone" | "dns_snapshot" | "subdomain" | "domain_alias";
+  dnsRecordType?:
+    | "A"
+    | "AAAA"
+    | "CNAME"
+    | "ALIAS"
+    | "MX"
+    | "TXT"
+    | "NS"
+    | "SOA"
+    | "SRV"
+    | "CAA";
 };
 
 export function createDiagnosticReferenceId() {
@@ -71,6 +95,8 @@ export function reportHostingerOperationDiagnostic(input: {
   failureKind?: PhpMyAdminFailureKind;
   responseShape?: PhpMyAdminDiagnosticResponseShape;
   payloadStructure?: PhpMyAdminPayloadStructure;
+  resourceCategory?: HostingerOperationDiagnostic["resourceCategory"];
+  dnsRecordType?: HostingerOperationDiagnostic["dnsRecordType"];
 }) {
   let referenceId = "000000000000";
   let fallbackDiagnostic: HostingerOperationDiagnostic = {
@@ -117,6 +143,12 @@ export function reportHostingerOperationDiagnostic(input: {
       diagnostic.responseShape = input.responseShape;
     }
     appendPayloadStructure(diagnostic, input.payloadStructure);
+    if (input.resourceCategory) {
+      diagnostic.resourceCategory = input.resourceCategory;
+    }
+    if (input.dnsRecordType) {
+      diagnostic.dnsRecordType = input.dnsRecordType;
+    }
     emitStructuredDiagnostic(
       operationDiagnosticLevel(diagnostic),
       "hostinger_operation_diagnostic",
@@ -135,6 +167,7 @@ export function reportHostingerOperationDiagnostic(input: {
 function operationDiagnosticLevel(
   diagnostic: HostingerOperationDiagnostic,
 ) {
+  if (diagnostic.result === "recovered") return "warn" as const;
   return diagnostic.upstreamStatus < 400 &&
     (diagnostic.result === "success" ||
       diagnostic.result === "accepted")

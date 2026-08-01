@@ -1,6 +1,6 @@
 # Hostinger Single-Site Console
 
-Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, build e log read-only, riavvio controllato del server Node.js e gestione dei database assegnati al dominio con policy capability default-deny.
+Dashboard privata multiutente per amministrare, in modo confinato, un solo sito Node.js su un piano Hostinger Business. Questa release contiene autenticazione, gestione utenti, modello dati, audit, client Hostinger server-only, onboarding con verifica/importazione del sito configurato, build e log read-only, riavvio controllato del server Node.js, database assegnati, cache, vulnerabilità e area domini per DNS, snapshot, sottodomini e alias con policy capability default-deny.
 
 ## Stack e requisiti
 
@@ -400,8 +400,9 @@ raggiungono mai il client, il database o l’audit.
   presentati come risorse del sito.
 - Build e log restano in sola lettura. Restart Node.js, operazioni database,
   cache site-scoped e patch selettiva delle vulnerabilità tramite pull request
-  sono le mutazioni Hostinger implementate. Deploy da archivio, DNS e le altre
-  capability fuori scope restano non implementati o negati.
+  sono le mutazioni Hostinger implementate. DNS confinato, sottodomini e alias
+  sono disponibili in `/domains`; deploy da archivio e capability fuori scope
+  restano non implementati o negati.
 
 ## Build Node.js, log e restart controllato
 
@@ -633,6 +634,92 @@ timeout producono messaggi controllati con reference ID.
 Cache e vulnerabilità riusano integralmente `hostinger_operations`; non è
 necessaria una migration `0005`.
 
+## Domini: DNS, snapshot, sottodomini e alias
+
+La pagina `/domains` implementa soltanto gli endpoint presenti
+nell'[OpenAPI Hostinger ufficiale v1.23.0](https://github.com/hostinger/api/blob/main/openapi.json):
+
+- `GET`, `PUT` e `DELETE /api/dns/v1/zones/{domain}`;
+- `POST /api/dns/v1/zones/{domain}/validate`;
+- `GET /api/dns/v1/snapshots/{domain}` e
+  `GET /api/dns/v1/snapshots/{domain}/{snapshotId}`;
+- `GET`, `POST` e `DELETE .../websites/{domain}/subdomains`;
+- `GET`, `POST` e `DELETE .../websites/{domain}/parked-domains`, presentati
+  nella UI come **Domain aliases**.
+
+Le route applicative sono specifiche sotto `/api/domains/*`; non esiste un
+proxy generico. Dominio primario e username Hostinger provengono sempre dal
+record `sites` riletto insieme alla sessione e alla membership. Il browser non
+può inviare token, username, dominio primario, zona completa, payload Hostinger
+o `overwrite`. ADMIN e MEMBER ricevono le stesse capability operative:
+`dns.records.*`, `dns.snapshots.list/view`, `subdomains.*` e `aliases.*`.
+Restore snapshot e reset zona sono registrati come pianificati e non hanno
+route o azioni UI.
+
+Il decoder DNS accetta esclusivamente i dieci tipi dell'enum OpenAPI 1.23.0:
+`A`, `AAAA`, `CNAME`, `ALIAS`, `MX`, `TXT`, `NS`, `SOA`, `SRV` e `CAA`.
+Ogni contenuto passa da un validatore specifico; IPv4/IPv6, IDNA, nomi relativi,
+FQDN, apex, trailing dot, TTL e priority incorporata in MX/SRV vengono
+controllati. I TXT mantengono esattamente spazi e virgolette. Campi sconosciuti
+sono scartati e gruppi/tipi non validi non raggiungono il browser. SOA e NS
+autoritativi dell'apex sono sempre read-only. A/AAAA/CNAME di apex e `www`, MX,
+SPF, DKIM e DMARC richiedono la digitazione esatta del nome prima di una
+modifica; la cancellazione di un gruppo richiede
+`DELETE {nome} {tipo}`.
+
+Prima di ogni PUT il servizio rilegge la zona, confronta il fingerprint
+SHA-256 dello stato visualizzato, costruisce il body server-side, forza
+`overwrite:false`, chiama `/validate` e procede soltanto dopo il 200. Un 422
+di validazione impedisce il PUT. Dopo la mutazione la zona viene riletta e la
+post-condizione deve essere visibile. Timeout, 404 e 5xx ambigui non causano
+retry della mutazione: viene eseguita al massimo una riconciliazione read-only.
+Tutte le mutazioni della zona condividono lo stesso resource hash in
+`hostinger_operations`, quindi sono incompatibili anche con operation type
+diversi. La UI conserva la stessa idempotency key durante un esito di rete
+ambiguo e usa un lock sincrono aggiuntivo.
+
+La semantica OpenAPI corrente è rilevante: con `overwrite:false` il PUT aggiorna
+TTL dei record corrispondenti e aggiunge valori nuovi, ma non sostituisce né
+rimuove un singolo contenuto esistente. Per non violare il divieto di
+overwrite, la dashboard consente creazione, aggiornamento TTL del gruppo e
+cancellazione esplicita dell'intero gruppo `name/type`. Se un gruppo contiene
+più valori, la rimozione del solo valore fallisce chiusa e non usa DELETE, che
+eliminerebbe tutti i fratelli. La sostituzione del contenuto richiede quindi
+creazione separata del nuovo valore, verifica e successiva valutazione della
+cancellazione dell'intero vecchio gruppo. Non viene mai offerta la sostituzione
+della zona completa.
+
+Gli snapshot espongono soltanto ID numerico sanificato, data e record validati.
+Il dettaglio prova un confronto sintetico per conteggi con la zona corrente;
+un errore del confronto non rende indisponibile lo snapshot. Restore, reset e
+full-zone replace non sono implementati.
+
+I sottodomini accettano un singolo label o FQDN esattamente subordinato al
+dominio autorevole. Root, wildcard, altro dominio, URL, protocollo, porta,
+path, query, IDNA invalido e label vuote sono rifiutati. La directory opzionale,
+documentata dallo schema, deve essere relativa alla site root e non può
+contenere path assoluti, backslash, null byte, `.` o `..`; i path infrastrutturali
+Hostinger ricevuti in lettura vengono scartati. Create e delete verificano
+duplicato/presenza live e post-condizione; delete usa un ID opaco e richiede il
+FQDN esatto.
+
+Gli alias accettano soltanto hostname IDNA lowercase. URL, porte, path, query,
+fragment, IP, host locali e dominio primario sono rifiutati. Le liste ignorano
+parked value di tipo IP e rimuovono username, parent domain e root directory.
+Create verifica i duplicati; un 422 viene presentato come mancata conferma di
+ownership o configurazione DNS senza dichiarare ownership verificata. Delete
+risolve un ID opaco nella lista live e richiede la digitazione esatta.
+
+Audit e diagnostica usano reference ID, fase statica, status, risultato,
+idempotency status, duration bucket, correlation ID sanificato, categoria
+statica e solo il tipo DNS allowlistato. Identificatori risorsa vengono hashati.
+Non vengono registrati contenuti DNS, IP, target, alias, sottodomini, payload,
+token, URL o stack. Successi sono `info`, errori reali `error` e riconciliazioni
+controllate dopo errore ambiguo `warn`. Tutte le risposte applicative usano
+header private/no-store, no-referrer e nosniff. Il blocco riusa
+`hostinger_operations`; non introduce una migration `0005` e non persiste
+copie della zona.
+
 ## GitHub Actions
 
 `.github/workflows/ci.yml` viene eseguito sui push e sulle pull request verso `main`. Usa Node dalla `.nvmrc`, cache npm e:
@@ -699,9 +786,11 @@ Non è necessario `vercel.json`.
 
 ## Limitazioni note
 
-- Build e log sono esclusivamente read-only; deploy da archivio, DNS,
-  registrar, sottodomini, alias, cron e altre mutazioni non elencate nelle
-  capability implementate non sono disponibili.
+- Build e log sono esclusivamente read-only. Deploy da archivio, registrar,
+  cron, restore/reset DNS, sostituzione completa della zona e altre mutazioni
+  non elencate nelle capability implementate non sono disponibili. Con
+  `overwrite:false`, modifica del contenuto e cancellazione di un solo valore
+  in un gruppo DNS multi-valore restano fail-closed.
 - Le operazioni account-wide o non associabili con certezza al sito
   configurato restano negate per tutti.
 - Email delivery e recupero password non sono configurati.
@@ -719,5 +808,8 @@ Validare build, log, restart, database, cache e vulnerabilità con un account di
 staging controllato, osservando paginazione, post-filtro del dominio,
 consistenza successiva alla creazione, repair asincrona, link phpMyAdmin,
 IPv4/IPv6, cooldown, replay idempotente, disponibilità GitHub e rate limit
-reali. Progettare deploy da archivio, DNS e ogni altra capability soltanto in
-fasi separate, mantenendo il confine single-site e il default-deny.
+reali. Validare inoltre DNS, snapshot, sottodomini e parked domains su un
+account di staging non produttivo, senza dedurre propagazione pubblica dal solo
+stato della zona Hostinger. Progettare deploy da archivio e ogni altra
+capability soltanto in fasi separate, mantenendo il confine single-site e il
+default-deny.

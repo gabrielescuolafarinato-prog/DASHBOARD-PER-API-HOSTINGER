@@ -17,6 +17,18 @@ export const hostingerSiteCapabilities = [
   "database.delete",
   "database.phpmyadmin.link",
   "database.remote.connections",
+  "dns.records.list",
+  "dns.records.create",
+  "dns.records.update",
+  "dns.records.delete",
+  "dns.snapshots.list",
+  "dns.snapshots.view",
+  "subdomains.list",
+  "subdomains.create",
+  "subdomains.delete",
+  "aliases.list",
+  "aliases.create",
+  "aliases.delete",
 ] as const;
 
 export type HostingerSiteCapability =

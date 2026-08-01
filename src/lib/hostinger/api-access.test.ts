@@ -28,7 +28,7 @@ describe("Hostinger API access boundary", () => {
         authenticatedState(membershipRole),
       );
       await expect(
-        requireHostingerApiAccess("database.list"),
+        requireHostingerApiAccess("dns.records.list"),
       ).resolves.toMatchObject({
         user: { id: "actor-1" },
         site: { siteId: "site-1", membershipRole },
